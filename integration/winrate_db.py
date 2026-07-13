@@ -47,13 +47,13 @@ class WinrateDB:
         self._cfg = load_config()
         self._log = logger
 
-        # Resolve DB path
+        # Resolve DB path — always use the winrate-specific path,
+        # not the general integration database config.
+        project_root = Path(__file__).resolve().parent.parent
         if db_path:
             self._db_path = Path(db_path)
         else:
-            db_rel = self._cfg.data.get("integration", {}).get("database", {}).get("path", _DEFAULT_DB_PATH)
-            project_root = Path(__file__).resolve().parent.parent
-            self._db_path = project_root / db_rel
+            self._db_path = project_root / _DEFAULT_DB_PATH
 
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -44,6 +44,49 @@ DEFAULT_PORT = 8903
 
 
 # ---------------------------------------------------------------------------
+# Middleware (module-level for aiohttp compatibility)
+# ---------------------------------------------------------------------------
+
+
+@web.middleware
+async def _cors_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
+    """Add CORS headers to all responses."""
+    if request.method == "OPTIONS":
+        return web.Response(
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            }
+        )
+    try:
+        response = await handler(request)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        return response
+    except web.HTTPException as exc:
+        exc.headers["Access-Control-Allow-Origin"] = "*"
+        raise
+
+
+@web.middleware
+async def _error_middleware(request: web.Request, handler: Any) -> web.StreamResponse:
+    """Catch unhandled exceptions and return JSON error responses."""
+    try:
+        return await handler(request)
+    except web.HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            f"Unhandled error on {request.method} {request.path}: {exc}",
+            exc_info=True,
+        )
+        return web.json_response(
+            {"error": "Internal server error", "detail": str(exc)},
+            status=500,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Integration Server
 # ---------------------------------------------------------------------------
 
@@ -57,13 +100,14 @@ class IntegrationServer:
         GET  /health        — server health
         GET  /versions      — list all strategy versions
         GET  /versions/<tag> — get a specific version
+        POST /versions      — create a new version
         POST /deploy        — deploy a strategy version
         POST /rollback      — trigger rollback to a previous version
         GET  /winrate/<tag> — winrate stats for a version
         GET  /winrate/best  — best performing version
         POST /winrate/compare — compare two versions
-        GET  /status        — unified system dashboard
         GET  /trades        — recent trades
+        GET  /status        — unified system dashboard
         GET  /dashboard     — aggregated dashboard view
     """
 
@@ -156,9 +200,9 @@ class IntegrationServer:
         """Configure routes and start the aiohttp server."""
         self._app = web.Application()
 
-        # Middleware
-        self._app.middlewares.append(self._cors_middleware)
-        self._app.middlewares.append(self._error_middleware)
+        # Middleware (module-level functions, not class methods)
+        self._app.middlewares.append(_cors_middleware)
+        self._app.middlewares.append(_error_middleware)
 
         # Routes
         self._app.router.add_get("/health", self._handle_health)
@@ -178,50 +222,6 @@ class IntegrationServer:
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._host, self._port)
         await site.start()
-
-    # ------------------------------------------------------------------
-    # Middleware
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    async def _cors_middleware(
-        request: web.Request, handler: Any
-    ) -> web.Response:
-        """Add CORS headers to all responses."""
-        if request.method == "OPTIONS":
-            return web.Response(
-                headers={
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-                    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-                }
-            )
-        try:
-            response = await handler(request)
-            response.headers["Access-Control-Allow-Origin"] = "*"
-            return response
-        except web.HTTPException as exc:
-            exc.headers["Access-Control-Allow-Origin"] = "*"
-            raise
-
-    @staticmethod
-    async def _error_middleware(
-        request: web.Request, handler: Any
-    ) -> web.Response:
-        """Catch unhandled exceptions and return JSON error responses."""
-        try:
-            return await handler(request)
-        except web.HTTPException:
-            raise
-        except Exception as exc:
-            logger.error(
-                f"Unhandled error on {request.method} {request.path}: {exc}",
-                exc_info=True,
-            )
-            return web.json_response(
-                {"error": "Internal server error", "detail": str(exc)},
-                status=500,
-            )
 
     # ------------------------------------------------------------------
     # Handlers: Health
@@ -375,11 +375,11 @@ class IntegrationServer:
     async def _handle_rollback(self, request: web.Request) -> web.Response:
         """POST /rollback — trigger a rollback to a previous version.
 
-        Body:: (manual rollback)
+        Body (manual rollback)::
             {"version_tag": "v1.0.0"}
 
-        Or with auto-detect::
-            {"auto": true, "strategy_name": "ema_crossover"}
+        Body (auto-detect)::
+            {"auto": true, "strategy_name": "ema_crossover", "current_version": "v1.0.1"}
         """
         try:
             body = await request.json()
