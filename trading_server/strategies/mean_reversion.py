@@ -105,12 +105,22 @@ class MeanReversionStrategy(BaseStrategy):
         atr_values = self.compute_atr(highs, lows, closes, self._atr_period)
         current_atr = atr_values[-1] if atr_values[-1] > 0 else (current_high - current_low) * 0.01
 
+        # Store indicators for analysis
+        self._last_indicators = {
+            "rsi": round(current_rsi, 2),
+            "adx": round(current_adx, 2),
+            "bb_upper": round(current_upper, 2),
+            "bb_middle": round(current_middle, 2),
+            "bb_lower": round(current_lower, 2),
+            "atr": round(current_atr, 6),
+            "close": round(current_close, 2),
+        }
+
         # 2. Filter: ADX < 25 (ranging market only)
         if current_adx >= self._adx_threshold:
-            logger.debug(
-                f"{symbol} | ADX={current_adx:.1f} >= {self._adx_threshold}, "
-                f"trending — skipping mean reversion"
-            )
+            msg = (f"ADX={current_adx:.1f} ≥ {self._adx_threshold}, trending — not suitable for mean reversion")
+            self._last_skip_reason = msg
+            logger.debug(f"{symbol} | {msg}")
             return None
 
         # 3. Check entry conditions
@@ -147,6 +157,10 @@ class MeanReversionStrategy(BaseStrategy):
             )
 
         if direction is None:
+            self._last_skip_reason = (
+                f"No entry signal: RSI={current_rsi:.1f} (need <30 for LONG or >70 for SHORT), "
+                f"price not at BB bands"
+            )
             return None
 
         # 4. Calculate levels
@@ -189,6 +203,7 @@ class MeanReversionStrategy(BaseStrategy):
         # Deduplicate: don't fire the same signal twice in a row
         last = self._last_signals.get(symbol)
         if last and last["direction"] == direction.value:
+            self._last_skip_reason = f"Duplicate {direction.value} signal suppressed (already sent)"
             logger.debug(f"{symbol} | Duplicate {direction.value} signal suppressed")
             return None
 

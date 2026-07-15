@@ -76,11 +76,16 @@ class TrendFollowStrategy(BaseStrategy):
         adx_values = self.compute_adx(highs, lows, closes, 14)
         current_adx = adx_values[-1]
 
+        # Store indicators for analysis
+        self._last_indicators = {
+            "adx": round(current_adx, 2),
+            "close": round(current_close, 2),
+        }
+
         if current_adx < self._adx_threshold:
-            logger.debug(
-                f"{symbol} | ADX={current_adx:.1f} < {self._adx_threshold}, "
-                f"not trending — skipping trend follow"
-            )
+            msg = f"ADX={current_adx:.1f} < {self._adx_threshold}, not trending — skipping trend follow"
+            self._last_skip_reason = msg
+            logger.debug(f"{symbol} | {msg}")
             return None
 
         # 2. Compute EMAs
@@ -90,6 +95,7 @@ class TrendFollowStrategy(BaseStrategy):
         ema_slow = ema_slow_values[-1]
 
         if ema_fast == 0 or ema_slow == 0:
+            self._last_skip_reason = "EMA values are zero — insufficient data"
             return None
 
         # 3. Compute Supertrend
@@ -98,6 +104,14 @@ class TrendFollowStrategy(BaseStrategy):
         )
         st_direction = st_result["direction"][-1]
         st_band = st_result["band"][-1]
+
+        # Update indicators with full set
+        self._last_indicators.update({
+            "ema_fast": round(ema_fast, 2),
+            "ema_slow": round(ema_slow, 2),
+            "supertrend_direction": st_direction,
+            "supertrend_band": round(st_band, 2),
+        })
 
         # 4. Determine entry signal
         direction: Optional[SignalDirection] = None
@@ -138,6 +152,10 @@ class TrendFollowStrategy(BaseStrategy):
             )
 
         if direction is None:
+            self._last_skip_reason = (
+                f"No trend signal: Supertrend dir={st_direction}, "
+                f"price={current_close:.2f} vs EMA50={ema_fast:.2f}, EMA200={ema_slow:.2f}"
+            )
             return None
 
         # 5. Calculate levels
@@ -185,6 +203,7 @@ class TrendFollowStrategy(BaseStrategy):
         # Dedup
         last = self._last_signals.get(symbol)
         if last and last["direction"] == direction.value:
+            self._last_skip_reason = f"Duplicate {direction.value} signal suppressed"
             return None
         self._last_signals[symbol] = {
             "direction": direction.value,

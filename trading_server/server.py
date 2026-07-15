@@ -111,6 +111,8 @@ class TradingServer:
         self._max_signals_kept = 100
         # Last detected market regime per symbol
         self._last_regime: Dict[str, str] = {}
+        # Last full analysis per symbol (regime + per-strategy results)
+        self._last_analysis: Dict[str, Dict[str, Any]] = {}
         # Last candle close timestamps per timeframe (for REST polling)
         self._last_poll: Dict[str, float] = {}
         # Cached kline data per symbol per timeframe
@@ -517,18 +519,45 @@ class TradingServer:
 
         # 5. Run each strategy
         signals: List[Signal] = []
+        strategies_result: Dict[str, Dict[str, Any]] = {}
         for name, strategy in self._strategies.items():
             if not strategy.enabled:
+                strategies_result[name] = {"enabled": False, "signal": False, "confidence": 0, "reason": "Strategy disabled"}
                 continue
             try:
                 signal = await strategy.execute(symbol, data, regime)
                 if signal is not None:
                     signals.append(signal)
+                    strategies_result[name] = {
+                        "enabled": True,
+                        "signal": True,
+                        "direction": signal.direction.value,
+                        "confidence": round(signal.confidence, 4),
+                        "reason": signal.reason,
+                        "indicators": signal.indicators,
+                    }
+                else:
+                    strategies_result[name] = {
+                        "enabled": True,
+                        "signal": False,
+                        "confidence": 0,
+                        "reason": strategy.last_skip_reason or "No entry conditions met",
+                        "indicators": strategy.last_indicators,
+                    }
             except Exception as exc:
                 self._log.error(
                     f"Strategy '{name}' error for {symbol}: {exc}",
                     exc_info=True,
                 )
+                strategies_result[name] = {"enabled": True, "signal": False, "confidence": 0, "reason": f"Error: {exc}"}
+
+        # Store analysis
+        async with self._lock:
+            self._last_analysis[symbol] = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "regime": regime,
+                "strategies": strategies_result,
+            }
 
         if not signals:
             self._log.debug(f"{symbol} | No signals generated")
@@ -1012,6 +1041,11 @@ class TradingServer:
                     "streams": self._ws.active_streams if self._ws else [],
                 },
                 "regime": dict(self._last_regime),
+                "analysis": {sym: {
+                    "timestamp": a["timestamp"],
+                    "regime": a["regime"],
+                    "strategies": a["strategies"],
+                } for sym, a in self._last_analysis.items()},
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )

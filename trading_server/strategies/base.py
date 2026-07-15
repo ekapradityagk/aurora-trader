@@ -30,10 +30,22 @@ class BaseStrategy(ABC):
     def __init__(self) -> None:
         self._config: Dict[str, Any] = {}
         self._enabled: bool = True
+        self._last_skip_reason: str = ""
+        self._last_indicators: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    @property
+    def last_skip_reason(self) -> str:
+        """Reason this strategy skipped on the last execute() call."""
+        return self._last_skip_reason
+
+    @property
+    def last_indicators(self) -> Dict[str, Any]:
+        """Indicator values from the last execute() call."""
+        return dict(self._last_indicators)
 
     @abstractmethod
     async def execute(
