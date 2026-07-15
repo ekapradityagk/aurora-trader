@@ -124,6 +124,7 @@ class BinanceWebSocket:
         # Config
         cfg = load_config()
         self._testnet = cfg.data.get("exchange", {}).get("testnet", True)
+        self._use_futures = cfg.data.get("exchange", {}).get("use_futures", False)
         ws_cfg = cfg.data.get("trading_server", {}).get("websocket", {})
         self._max_retries = ws_cfg.get("max_retries", max_retries)
         self._retry_delay = ws_cfg.get("retry_delay_seconds", retry_delay_seconds)
@@ -236,17 +237,32 @@ class BinanceWebSocket:
 
                 bm = BinanceSocketManager(client, user_timeout=self._ping_interval)
 
-                # Subscribe to all kline streams
-                self._ws = bm.multiplex_socket(self._streams)
+                # Subscribe to all kline streams (futures or spot)
+                if self._use_futures:
+                    self._ws = bm.futures_multiplex_socket(self._streams)
+                else:
+                    self._ws = bm.multiplex_socket(self._streams)
+
                 async with self._ws as stream:
                     self._log.info("WebSocket connected successfully")
                     attempt = 0  # reset backoff on successful connect
                     self._subscribed_streams = set(self._streams)
 
-                    async for msg in stream:
-                        if not self._running:
-                            break
-                        await self._handle_message(msg)
+                    # Handle both old (async generator) and new (recv-based) APIs
+                    try:
+                        async for msg in stream:
+                            if not self._running:
+                                break
+                            await self._handle_message(msg)
+                    except AttributeError:
+                        # Newer python-binance versions use recv()
+                        while self._running:
+                            try:
+                                msg = await stream.recv()
+                                if msg:
+                                    await self._handle_message(msg)
+                            except asyncio.TimeoutError:
+                                continue
 
                 # Clean disconnect
                 await client.close_connection()

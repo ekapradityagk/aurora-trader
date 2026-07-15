@@ -18,11 +18,11 @@ project:
 # ---------------------------------------------------------------------------
 exchange:
   name: "binance"
-  testnet: true                        # Use Binance testnet (safe for dev)
+  testnet: false                       # Use real Binance account
   api_key: ""                          # Override via AURORA_BINANCE_API_KEY
   api_secret: ""                       # Override via AURORA_BINANCE_API_SECRET
-  use_futures: false
-  default_leverage: 1
+  use_futures: true
+  default_leverage: 5
   margin_type: "isolated"              # isolated | cross
   rate_limit:
     requests_per_minute: 1200

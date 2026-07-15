@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
@@ -205,6 +206,8 @@ class IntegrationServer:
         self._app.middlewares.append(_error_middleware)
 
         # Routes
+        self._app.router.add_get("/", self._handle_redirect_dashboard)
+        self._app.router.add_get("/dashboard", self._handle_index)
         self._app.router.add_get("/health", self._handle_health)
         self._app.router.add_get("/versions", self._handle_list_versions)
         self._app.router.add_get("/versions/{tag}", self._handle_get_version)
@@ -216,12 +219,34 @@ class IntegrationServer:
         self._app.router.add_post("/winrate/compare", self._handle_winrate_compare)
         self._app.router.add_get("/trades", self._handle_trades)
         self._app.router.add_get("/status", self._handle_status)
-        self._app.router.add_get("/dashboard", self._handle_dashboard)
+        self._app.router.add_get("/api/dashboard", self._handle_dashboard)
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self._host, self._port)
         await site.start()
+
+    # ------------------------------------------------------------------
+    # Handlers: Index (HTML Dashboard)
+    # ------------------------------------------------------------------
+
+    async def _handle_index(self, request: web.Request) -> web.Response:
+        """GET /dashboard — serve the Aurora Trader HTML dashboard."""
+        import os
+        html_path = os.path.join(os.path.dirname(__file__), "dashboard.html")
+        try:
+            with open(html_path, "r") as f:
+                html = f.read()
+            return web.Response(text=html, content_type="text/html")
+        except FileNotFoundError:
+            return web.Response(
+                text="<h1>Aurora Trader</h1><p>Dashboard HTML not found. Run from project root.</p>",
+                content_type="text/html", status=200
+            )
+
+    async def _handle_redirect_dashboard(self, request: web.Request) -> web.Response:
+        """GET / — redirect to the HTML dashboard at /dashboard."""
+        raise web.HTTPFound("/dashboard")
 
     # ------------------------------------------------------------------
     # Handlers: Health
@@ -498,6 +523,9 @@ class IntegrationServer:
     async def _handle_trades(self, request: web.Request) -> web.Response:
         """GET /trades — get recent trade results.
 
+        Merges local winrate_db trades with real Binance futures
+        income history (realized PnL) and spot trades.
+
         Query params:
             version (optional): filter by version tag
             limit (int, default 50): max results
@@ -506,15 +534,156 @@ class IntegrationServer:
         limit = int(request.query.get("limit", "50"))
         limit = min(limit, 500)
 
-        trades = await self._winrate_db.get_recent_trades(
+        local_trades = await self._winrate_db.get_recent_trades(
             version_tag=version_tag or None,
             limit=limit,
         )
+
+        # Try to fetch real Binance activity
+        binance_trades = []
+        try:
+            from binance.client import Client
+            from shared.config import load_config
+
+            cfg = load_config()
+            key = cfg.exchange_api_key
+            secret = cfg.exchange_api_secret
+
+            if key and secret:
+                client = Client(key, secret)
+                now_ms = int(time.time() * 1000)
+                thirty_days_ago = now_ms - (30 * 24 * 60 * 60 * 1000)
+
+                # 1. Futures Income History — ALL transaction types
+                income = client.futures_income_history(
+                    startTime=thirty_days_ago, limit=200
+                )
+                for entry in income:
+                    income_type = entry["incomeType"]
+                    symbol = entry.get("symbol", "—")
+                    amount = float(entry["income"])
+                    asset = entry.get("asset", "USDT")
+
+                    if income_type == "REALIZED_PNL":
+                        binance_trades.append({
+                            "trade_id": f"futures_pnl_{entry['time']}",
+                            "symbol": symbol,
+                            "side": "LONG" if amount >= 0 else "SHORT",
+                            "pnl": amount,
+                            "price": 0,
+                            "qty": 0,
+                            "asset": asset,
+                            "activity_type": "futures_pnl",
+                            "source": "binance",
+                            "closed_at": datetime.fromtimestamp(
+                                int(entry["time"]) / 1000, tz=timezone.utc
+                            ).isoformat(),
+                        })
+                    elif income_type == "FUNDING_FEE":
+                        binance_trades.append({
+                            "trade_id": f"funding_{entry['time']}",
+                            "symbol": symbol,
+                            "side": "RECEIVED" if amount >= 0 else "PAID",
+                            "pnl": amount,
+                            "price": 0,
+                            "qty": 0,
+                            "asset": asset,
+                            "activity_type": "funding_fee",
+                            "source": "binance",
+                            "closed_at": datetime.fromtimestamp(
+                                int(entry["time"]) / 1000, tz=timezone.utc
+                            ).isoformat(),
+                        })
+                    elif income_type == "COMMISSION":
+                        binance_trades.append({
+                            "trade_id": f"commission_{entry['time']}",
+                            "symbol": symbol,
+                            "side": "",
+                            "pnl": amount,
+                            "price": 0,
+                            "qty": 0,
+                            "asset": asset,
+                            "activity_type": "commission",
+                            "source": "binance",
+                            "closed_at": datetime.fromtimestamp(
+                                int(entry["time"]) / 1000, tz=timezone.utc
+                            ).isoformat(),
+                        })
+                    else:
+                        # TRANSFER, INSURANCE_CLEAR, etc.
+                        binance_trades.append({
+                            "trade_id": f"other_{entry['time']}",
+                            "symbol": symbol,
+                            "side": income_type,
+                            "pnl": amount,
+                            "price": 0,
+                            "qty": 0,
+                            "asset": asset,
+                            "activity_type": "other",
+                            "source": "binance",
+                            "closed_at": datetime.fromtimestamp(
+                                int(entry["time"]) / 1000, tz=timezone.utc
+                            ).isoformat(),
+                        })
+
+                # 2. Spot trade history (recent active pairs)
+                for sym in ["NXPCUSDT", "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]:
+                    try:
+                        spot_trades = client.get_my_trades(symbol=sym, limit=20)
+                        for t in spot_trades:
+                            binance_trades.append({
+                                "trade_id": f"spot_{t['id']}",
+                                "symbol": sym,
+                                "side": "BUY" if t["isBuyer"] else "SELL",
+                                "pnl": 0,
+                                "price": float(t["price"]),
+                                "qty": float(t["qty"]),
+                                "total": float(t["qty"]) * float(t["price"]),
+                                "asset": sym.replace("USDT", ""),
+                                "activity_type": "spot_trade",
+                                "source": "binance",
+                                "closed_at": datetime.fromtimestamp(
+                                    int(t["time"]) / 1000, tz=timezone.utc
+                                ).isoformat(),
+                            })
+                    except Exception:
+                        pass
+
+                client.close_connection()
+                activity_counts = {}
+                for t in binance_trades:
+                    at = t.get("activity_type", "unknown")
+                    activity_counts[at] = activity_counts.get(at, 0) + 1
+                count_str = ", ".join(f"{k}={v}" for k, v in activity_counts.items())
+                self._log.info(
+                    f"Fetched {len(binance_trades)} real activities from Binance ({count_str})"
+                )
+        except Exception as exc:
+            self._log.warning(f"Could not fetch Binance trades: {exc}")
+
+        # Merge: real Binance trades first, then local trades, deduped by ID
+        seen = set()
+        merged = []
+        for t in binance_trades + local_trades:
+            tid = t.get("trade_id", "")
+            if tid not in seen:
+                seen.add(tid)
+                merged.append(t)
+
+        # Sort by date descending, then limit
+        merged.sort(
+            key=lambda t: t.get("closed_at", "") or "",
+            reverse=True,
+        )
+        merged = merged[:limit]
+
         return web.json_response(
             {
-                "count": len(trades),
+                "count": len(merged),
+                "binance_trades": len(binance_trades),
+                "local_trades": len(local_trades),
                 "version_filter": version_tag or "all",
-                "trades": trades,
+                "trades": merged,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )

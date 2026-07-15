@@ -113,8 +113,8 @@ class TradingServer:
         self._last_poll: Dict[str, float] = {}
         # Cached kline data per symbol per timeframe
         self._cached_data: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        # Account balance (updated periodically)
-        self._account_balance: Decimal = Decimal("10000")  # default test balance
+        # Account balance (fetched on startup from exchange)
+        self._account_balance: Decimal = Decimal("0")  # filled by _update_balance()
         # Daily trade count
         self._daily_trade_count: int = 0
         # Last reset date for daily counters
@@ -889,8 +889,11 @@ class TradingServer:
             balance = await self._rest.get_balance("USDT")
             if balance > 0:
                 self._account_balance = balance
-        except Exception:
-            self._log.debug("Using default account balance")
+                self._log.info(f"Fetched live balance: {balance:.2f} USDT")
+            else:
+                self._log.warning(f"Balance fetch returned 0, keeping previous: {self._account_balance:.2f}")
+        except Exception as exc:
+            self._log.warning(f"Could not fetch balance: {exc}, using {self._account_balance:.2f}")
 
     # ------------------------------------------------------------------
     # Regime Detection (simple)

@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aurora Trader — Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0a0e1a;
+    color: #c8d6e5;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  .header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 30px; padding-bottom: 20px;
+    border-bottom: 1px solid #1a1f35;
+  }
+  .header h1 {
+    font-size: 28px; font-weight: 700;
+    background: linear-gradient(135deg, #00d2ff, #7b2ff7);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .header .subtitle { color: #5a6a8a; font-size: 14px; margin-top: 4px; }
+  .status-dot {
+    display: inline-block; width: 10px; height: 10px;
+    border-radius: 50%; margin-right: 6px;
+  }
+  .status-dot.online { background: #2ecc71; box-shadow: 0 0 8px #2ecc7180; }
+  .status-dot.offline { background: #e74c3c; box-shadow: 0 0 8px #e74c3c80; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card {
+    background: #111827; border: 1px solid #1e293b; border-radius: 12px;
+    padding: 20px; transition: border-color 0.2s;
+  }
+  .card:hover { border-color: #2d3a5e; }
+  .card h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: #5a6a8a; margin-bottom: 12px; }
+  .card .value { font-size: 28px; font-weight: 700; color: #e2e8f0; }
+  .card .label { font-size: 12px; color: #5a6a8a; margin-top: 4px; }
+  .card .badge {
+    display: inline-block; padding: 2px 10px; border-radius: 20px;
+    font-size: 11px; font-weight: 600; margin-top: 8px;
+  }
+  .badge.green { background: #064e3b; color: #6ee7b7; }
+  .badge.red { background: #450a0a; color: #fca5a5; }
+  .badge.blue { background: #0c1d38; color: #60a5fa; }
+  .badge.yellow { background: #3c2e00; color: #fde68a; }
+  .badge.purple { background: #1e1338; color: #c4b5fd; }
+
+  .section { margin: 24px 0; }
+  .section h2 { font-size: 16px; color: #94a3b8; margin-bottom: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; color: #5a6a8a; padding: 8px 12px; border-bottom: 1px solid #1e293b; }
+  td { padding: 8px 12px; border-bottom: 1px solid #151d30; font-size: 13px; }
+  tr:hover td { background: #0f1729; }
+
+  .mini-card { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; background: #0f1729; border-radius: 8px; border: 1px solid #1e293b; font-size: 13px; margin: 4px; }
+  .mini-card .num { font-weight: 700; color: #e2e8f0; }
+
+  .loading { text-align: center; padding: 60px 20px; color: #5a6a8a; }
+  .loading .spinner { width: 32px; height: 32px; border: 3px solid #1e293b; border-top: 3px solid #7b2ff7; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 16px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .error-state { text-align: center; padding: 40px; color: #fca5a5; }
+  .refresh-btn {
+    background: #1e293b; border: 1px solid #2d3a5e; color: #c8d6e5;
+    padding: 8px 20px; border-radius: 8px; cursor: pointer; font-size: 13px;
+    transition: all 0.2s; min-width: 100px; display: inline-flex; align-items: center; gap: 6px; justify-content: center;
+  }
+  .refresh-btn:hover { background: #2d3a5e; }
+  .refresh-btn:disabled { opacity: 0.4; cursor: wait; }
+  .refresh-btn .spin { display: none; width: 14px; height: 14px; border: 2px solid #5a6a8a; border-top: 2px solid #7b2ff7; border-radius: 50%; }
+  .refresh-btn:disabled .spin { display: inline-block; animation: spin 1s linear infinite; }
+  .refresh-btn:disabled .label { display: none; }
+  .last-updated { font-size: 12px; color: #5a6a8a; text-align: right; margin-top: 16px; }
+  .nav-links { display: flex; gap: 16px; margin-top: 16px; flex-wrap: wrap; }
+  .nav-links a { color: #60a5fa; text-decoration: none; font-size: 13px; padding: 6px 14px; border: 1px solid #1e293b; border-radius: 6px; transition: all 0.2s; }
+  .nav-links a:hover { background: #1e293b; border-color: #60a5fa; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>🌌 Aurora Trader</h1>
+      <div class="subtitle">Real-time trading system dashboard</div>
+    </div>
+    <div>
+      <span class="status-dot" id="statusDot"></span>
+      <span id="serverStatus" style="font-size:14px;font-weight:600;">Loading...</span>
+    </div>
+  </div>
+
+  <div id="loadingState" class="loading">
+    <div class="spinner"></div>
+    <div>Loading Aurora Trader data...</div>
+  </div>
+  <div id="errorState" class="error-state" style="display:none;"></div>
+  <div id="dashboardContent" style="display:none;">
+
+    <div class="grid">
+      <div class="card">
+        <h3>💰 Account Balance</h3>
+        <div class="value" id="balanceVal">—</div>
+        <div class="label" id="balanceLabel">Real Binance Account</div>
+      </div>
+      <div class="card">
+        <h3>📈 Active Strategies</h3>
+        <div class="value" id="strategyCount">—</div>
+        <div id="strategyList" style="margin-top:8px;"></div>
+      </div>
+      <div class="card">
+        <h3>📡 WebSocket</h3>
+        <div class="value" id="winrateVal">—</div>
+        <div class="label">Binance data feed</div>
+      </div>
+      <div class="card">
+        <h3>🔄 Uptime</h3>
+        <div class="value" id="uptimeVal">—</div>
+        <div class="label" id="serverVersion">Version —</div>
+      </div>
+    </div>
+
+    <div class="section" id="versionSection">
+      <h2>📦 Strategy Versions</h2>
+      <div id="versionList"><span style="color:#5a6a8a;">No versions deployed yet</span></div>
+    </div>
+
+    <div class="section" id="tradesSection">
+      <h2>📋 Recent Activity</h2>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead><tr><th>#</th><th>Type</th><th>Pair</th><th>Detail</th><th>Value</th><th>Date</th></tr></thead>
+          <tbody id="tradesBody">
+            <tr><td colspan="6" style="text-align:center;color:#5a6a8a;">No activity yet</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>🔗 Quick Links</h2>
+      <div class="nav-links">
+        <a href="/api/dashboard" target="_blank">📡 API (JSON)</a>
+        <a href="/status" target="_blank">📊 System Status</a>
+        <a href="/versions" target="_blank">📦 Versions</a>
+        <a href="/trades" target="_blank">📋 Trade History</a>
+        <a href="/health" target="_blank">💚 Health Check</a>
+      </div>
+    </div>
+
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:20px;">
+      <button class="refresh-btn" id="refreshBtn" onclick="refreshData()"><span class="spin"></span><span class="label">🔄 Refresh</span></button>
+      <div class="last-updated" id="lastUpdated">—</div>
+    </div>
+  </div>
+
+  <script>
+    let DATA = null;
+    let isFirstLoad = true;
+
+    async function fetchJSON(url) {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      return resp.json();
+    }
+
+    function fmtTime(ts) {
+      if (!ts) return '—';
+      try { return new Date(ts).toLocaleString(); } catch(e) { return ts; }
+    }
+
+    function fmtUsd(v) {
+      if (v === null || v === undefined) return '—';
+      return '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
+    }
+
+    function fmtUptime(s) {
+      if (!s) return '—';
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = Math.floor(s % 60);
+      if (h > 0) return `${h}h ${m}m ${sec}s`;
+      if (m > 0) return `${m}m ${sec}s`;
+      return `${sec}s`;
+    }
+
+    async function refreshData() {
+      const btn = document.getElementById('refreshBtn');
+
+      if (isFirstLoad) {
+        document.getElementById('loadingState').style.display = 'block';
+        document.getElementById('dashboardContent').style.display = 'none';
+        document.getElementById('errorState').style.display = 'none';
+      } else {
+        // Subtle: just disable button + hide old error
+        if (btn) btn.disabled = true;
+        document.getElementById('errorState').style.display = 'none';
+      }
+
+      try {
+        const [systemStatus, tradesData, tradingHealth] = await Promise.all([
+          fetchJSON('/status').catch(() => ({})),
+          fetchJSON('/trades').catch(() => ({trades:[]})),
+          fetchJSON('http://127.0.0.1:8900/health').catch(() => ({})),
+        ]);
+
+        DATA = { systemStatus, tradesData, tradingHealth };
+
+        if (isFirstLoad) {
+          isFirstLoad = false;
+          document.getElementById('loadingState').style.display = 'none';
+          document.getElementById('dashboardContent').style.display = 'block';
+        }
+
+        updateDashboard();
+      } catch (err) {
+        if (isFirstLoad) {
+          document.getElementById('loadingState').style.display = 'none';
+          const errEl = document.getElementById('errorState');
+          errEl.style.display = 'block';
+          errEl.innerHTML = `<p style="font-size:18px;margin-bottom:12px;">⚠️ Connection Error</p>
+            <p>${err.message}</p>
+            <p style="margin-top:12px;">Make sure the Aurora Trader servers are running on ports 8900-8903</p>
+            <button class="refresh-btn" style="margin-top:20px;" onclick="refreshData()">🔄 Retry</button>`;
+        }
+        // Subsequent errors: keep old data quietly, no flash
+      }
+
+      if (btn) btn.disabled = false;
+    }
+
+    function updateDashboard() {
+      const ss = DATA.systemStatus || {};
+      const td = DATA.tradingHealth || {};
+      const trades = (DATA.tradesData && DATA.tradesData.trades) || [];
+
+      const tradingComp = ss.components?.trading_server || {};
+      const healthResp = tradingComp.health?.response || {};
+      const accountInfo = tradingComp.details?.account || {};
+
+      // Status dot — in-place update
+      const statusOk = healthResp.status === 'ok' || ss.coordinator?.running === true;
+      document.getElementById('statusDot').className = 'status-dot ' + (statusOk ? 'online' : 'offline');
+      document.getElementById('serverStatus').textContent = statusOk ? 'ONLINE' : 'OFFLINE';
+
+      // Balance — in-place
+      const bal = accountInfo.balance_usdt || td.balance || 0;
+      document.getElementById('balanceVal').textContent = fmtUsd(bal);
+      document.getElementById('balanceLabel').textContent = 'Real Binance Account (Futures)';
+
+      // Strategies — in-place
+      const strats = healthResp.active_strategies || [];
+      document.getElementById('strategyCount').textContent = strats.length;
+      const wsOk = healthResp.ws_connected;
+      document.getElementById('strategyList').innerHTML = strats.map(s => `<span class="mini-card">⚡ ${s}</span>`).join('')
+        + (wsOk
+          ? ' <span class="badge green">● WebSocket Live</span>'
+          : ' <span class="badge red">● WebSocket Down</span>');
+
+      // WebSocket status — in-place
+      document.getElementById('winrateVal').textContent = wsOk ? 'Connected' : 'Disconnected';
+      document.getElementById('winrateVal').style.color = wsOk ? '#6ee7b7' : '#fca5a5';
+
+      // Uptime — in-place
+      const uptime = healthResp.uptime_seconds || 0;
+      document.getElementById('uptimeVal').textContent = fmtUptime(uptime);
+      document.getElementById('serverVersion').textContent = 'Coordinator ' + (ss.coordinator?.version || '?');
+
+      // Versions — in-place
+      document.getElementById('versionList').innerHTML = '<span style="color:#5a6a8a;">Waiting for first strategy deployment</span>';
+
+      // Trades → Recent Activity — only rebuild the table body
+      const tb = document.getElementById('tradesBody');
+      if (trades.length === 0) {
+        tb.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#5a6a8a;">No activity yet</td></tr>';
+      } else {
+        tb.innerHTML = trades.slice(0, 30).map((t, i) => {
+          const actType = t.activity_type || 'trade';
+
+          let typeBadge, typeColor, detail, valStr, valColor;
+
+          if (actType === 'futures_pnl') {
+            const isWin = (t.pnl || 0) >= 0;
+            typeBadge = 'Realized PnL';
+            typeColor = isWin ? 'green' : 'red';
+            detail = t.side || '—';
+            valStr = (isWin ? '+' : '') + (t.pnl || 0).toFixed(2) + ' USDT';
+            valColor = isWin ? '#6ee7b7' : '#fca5a5';
+          } else if (actType === 'funding_fee') {
+            const recv = (t.pnl || 0) >= 0;
+            typeBadge = 'Funding';
+            typeColor = recv ? 'blue' : 'yellow';
+            detail = t.side || '—';
+            valStr = (recv ? '+' : '') + (t.pnl || 0).toFixed(2) + ' USDT';
+            valColor = recv ? '#6ee7b7' : '#fca5a5';
+          } else if (actType === 'commission') {
+            typeBadge = 'Fee';
+            typeColor = 'purple';
+            detail = '—';
+            valStr = (t.pnl || 0).toFixed(2) + ' ' + (t.asset || 'USDT');
+            valColor = '#fca5a5';
+          } else if (actType === 'spot_trade') {
+            typeBadge = 'Spot';
+            typeColor = 'blue';
+            detail = (t.side || '—') + ' @ ' + (t.price ? '$' + Number(t.price).toLocaleString(undefined, {minimumFractionDigits:6}) : '—');
+            valStr = (t.total || 0).toFixed(2) + ' USDT';
+            valColor = '#e2e8f0';
+          } else {
+            typeBadge = t.side || actType;
+            typeColor = 'yellow';
+            detail = '—';
+            valStr = (t.pnl || 0).toFixed(2) + ' USDT';
+            valColor = '#e2e8f0';
+          }
+
+          return `<tr>
+            <td style="color:#5a6a8a;">${i+1}</td>
+            <td><span class="badge ${typeColor}">${typeBadge}</span></td>
+            <td style="font-weight:600;">${t.symbol || t.pair || '—'}</td>
+            <td style="font-size:12px;color:#94a3b8;">${detail}</td>
+            <td style="color:${valColor};font-weight:600;">${valStr}</td>
+            <td style="font-size:12px;color:#5a6a8a;">${fmtTime(t.closed_at || t.created_at || t.timestamp)}</td>
+          </tr>`;
+        }).join('');
+      }
+
+      // Last updated — in-place
+      document.getElementById('lastUpdated').textContent = 'Last updated: ' + new Date().toLocaleString();
+    }
+
+    // Kick off initial load (loading spinner first time only)
+    refreshData();
+    // Auto-refresh every 15s — never flashes, just disables button briefly
+    setInterval(refreshData, 15000);
+  </script>
+</body>
+</html>

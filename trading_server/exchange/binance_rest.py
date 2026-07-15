@@ -51,8 +51,31 @@ class BinanceRestClient:
         self._api_key = cfg.exchange_api_key
         self._api_secret = cfg.exchange_api_secret
         self._testnet = cfg.exchange_testnet
+        self._use_futures = cfg.exchange_use_futures
+        self._default_leverage = cfg.exchange_default_leverage
+        self._margin_type = cfg.exchange_margin_type
         self._max_retries = 3
         self._base_delay = 1.0
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _method_name(self, spot_name: str) -> str:
+        """Map a generic method name to spot or futures variant."""
+        if not self._use_futures:
+            return spot_name
+        # Map common methods to their futures counterparts
+        mapping = {
+            "get_account": "futures_account",
+            "create_order": "futures_create_order",
+            "cancel_order": "futures_cancel_order",
+            "get_order": "futures_get_order",
+            "get_open_orders": "futures_get_open_orders",
+            "get_exchange_info": "futures_exchange_info",
+            "get_symbol_ticker": "futures_symbol_ticker",
+        }
+        return mapping.get(spot_name, spot_name)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -80,9 +103,30 @@ class BinanceRestClient:
                 api_secret=api_secret,
             )
 
+        # Futures-specific setup
+        if self._use_futures:
+            try:
+                # Set leverage
+                await self._client.futures_change_leverage(
+                    symbol="BTCUSDT",
+                    leverage=self._default_leverage,
+                )
+                # Set margin type (isolated / cross)
+                await self._client.futures_change_margin_type(
+                    symbol="BTCUSDT",
+                    marginType=self._margin_type.upper(),
+                )
+                self._log.info(
+                    f"Futures configured: leverage={self._default_leverage}x, "
+                    f"margin={self._margin_type}"
+                )
+            except Exception as exc:
+                self._log.warning(f"Futures setup warning (may already be set): {exc}")
+
         self._log.info(
             f"Binance REST client initialised "
-            f"({'testnet' if self._testnet else 'mainnet'})"
+            f"{'testnet' if self._testnet else 'mainnet'}"
+            f"{' futures' if self._use_futures else ' spot'}"
         )
         return self._client
 
@@ -139,9 +183,10 @@ class BinanceRestClient:
                 client = await self._ensure_client()
 
                 # Map our generic method names to the AsyncClient methods
-                client_method = getattr(client, method, None)
+                resolved = self._method_name(method)
+                client_method = getattr(client, resolved, None)
                 if client_method is None:
-                    raise ValueError(f"Unknown method: {method}")
+                    raise ValueError(f"Unknown method: {method} -> {resolved}")
 
                 result = await client_method(*args, **kwargs)
                 return result
@@ -392,19 +437,32 @@ class BinanceRestClient:
 
     async def get_account_info(self) -> Dict[str, Any]:
         """Get full account information including all balances."""
+        if self._use_futures:
+            return await self._request_with_retry("get_account")
         return await self._request_with_retry("get_account")
 
     async def get_balance(self, asset: str = "USDT") -> Decimal:
         """Get the free balance for a specific asset.
 
+        For futures, returns the wallet balance (available + used margin).
+        For spot, returns the free balance.
+
         Returns:
-            Decimal amount of free balance.
+            Decimal amount of balance.
         """
         info = await self.get_account_info()
-        for bal in info.get("balances", []):
-            if bal["asset"] == asset.upper():
-                return Decimal(bal.get("free", "0"))
-        return Decimal("0")
+        if self._use_futures:
+            # Futures format: {"assets": [{"asset":"USDT","walletBalance":"43.98",...}]}
+            for bal in info.get("assets", []):
+                if bal.get("asset", "").upper() == asset.upper():
+                    return Decimal(bal.get("walletBalance", "0"))
+            return Decimal("0")
+        else:
+            # Spot format: {"balances": [{"asset":"USDT","free":"5.08","locked":"0.00"}]}
+            for bal in info.get("balances", []):
+                if bal["asset"] == asset.upper():
+                    return Decimal(bal.get("free", "0"))
+            return Decimal("0")
 
     async def get_all_balances(self) -> Dict[str, Dict[str, Decimal]]:
         """Get all non-zero balances as a dict keyed by asset.
@@ -414,11 +472,23 @@ class BinanceRestClient:
         """
         info = await self.get_account_info()
         result: Dict[str, Dict[str, Decimal]] = {}
-        for bal in info.get("balances", []):
-            free = Decimal(bal.get("free", "0"))
-            locked = Decimal(bal.get("locked", "0"))
-            if free > 0 or locked > 0:
-                result[bal["asset"]] = {"free": free, "locked": locked}
+        if self._use_futures:
+            for bal in info.get("assets", []):
+                total = Decimal(bal.get("walletBalance", "0"))
+                upnl = Decimal(bal.get("unrealizedProfit", "0"))
+                if total > 0:
+                    result[bal["asset"]] = {
+                        "free": total + upnl,  # available = wallet + unrealized
+                        "locked": Decimal("0"),
+                        "wallet_balance": total,
+                        "unrealized_pnl": upnl,
+                    }
+        else:
+            for bal in info.get("balances", []):
+                free = Decimal(bal.get("free", "0"))
+                locked = Decimal(bal.get("locked", "0"))
+                if free > 0 or locked > 0:
+                    result[bal["asset"]] = {"free": free, "locked": locked}
         return result
 
     async def get_ticker_price(self, symbol: str) -> Decimal:
