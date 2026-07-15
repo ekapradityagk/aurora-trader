@@ -183,6 +183,13 @@ class TradingServer:
             # 6. Fetch initial kline history for all timeframes
             await self._fetch_initial_klines()
 
+            # 6b. Run initial analysis on historical data so dashboard shows
+            #     pair cards immediately instead of waiting for next 1h close
+            self._log.info("Running initial strategy analysis on historical data...")
+            for symbol in self._symbols:
+                await self._run_strategy_checks(symbol)
+            self._log.info("Initial analysis complete")
+
             # 7. Start background tasks
             self._running = True
             self._tasks.add(
