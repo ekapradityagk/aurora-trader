@@ -109,6 +109,8 @@ class TradingServer:
         # Recent signals (ring buffer)
         self._recent_signals: List[Signal] = []
         self._max_signals_kept = 100
+        # Last detected market regime per symbol
+        self._last_regime: Dict[str, str] = {}
         # Last candle close timestamps per timeframe (for REST polling)
         self._last_poll: Dict[str, float] = {}
         # Cached kline data per symbol per timeframe
@@ -511,6 +513,7 @@ class TradingServer:
 
         # 4. Determine market regime for filtering
         regime = await self._detect_regime(symbol, data)
+        self._last_regime[symbol] = regime
 
         # 5. Run each strategy
         signals: List[Signal] = []
@@ -1008,6 +1011,7 @@ class TradingServer:
                     "connected": self._ws.is_connected if self._ws else False,
                     "streams": self._ws.active_streams if self._ws else [],
                 },
+                "regime": dict(self._last_regime),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )

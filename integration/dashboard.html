@@ -59,6 +59,10 @@
 
   .mini-card { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; background: #0f1729; border-radius: 8px; border: 1px solid #1e293b; font-size: 13px; margin: 4px; }
   .mini-card .num { font-weight: 700; color: #e2e8f0; }
+  .mini-card-sm { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; background: #0f1729; border-radius: 6px; border: 1px solid #1e293b; font-size: 11px; margin: 2px; }
+  .cb-row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; padding: 4px 0; }
+  .cb-row .cb-label { color: #5a6a8a; }
+  .cb-row .cb-val { font-weight: 600; color: #e2e8f0; }
 
   .loading { text-align: center; padding: 60px 20px; color: #5a6a8a; }
   .loading .spinner { width: 32px; height: 32px; border: 3px solid #1e293b; border-top: 3px solid #7b2ff7; border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 16px; }
@@ -121,11 +125,29 @@
         <div class="value" id="uptimeVal">—</div>
         <div class="label" id="serverVersion">Version —</div>
       </div>
+      <div class="card">
+        <h3>🛡️ Circuit Breaker</h3>
+        <div id="cbBody">
+          <div class="value" id="cbStatus" style="font-size:20px;">—</div>
+          <div id="cbDetail" class="label"></div>
+        </div>
+      </div>
     </div>
 
     <div class="section" id="versionSection">
       <h2>📦 Strategy Versions</h2>
       <div id="versionList"><span style="color:#5a6a8a;">No versions deployed yet</span></div>
+    </div>
+
+    <div class="section" id="regimeSection">
+      <h2>🎯 Market Status</h2>
+      <div id="regimeBody" style="display:flex;flex-wrap:wrap;gap:12px;align-items:center;"><span style="color:#5a6a8a;">Waiting for market data...</span></div>
+      <div id="signalBody" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="section" id="positionsSection">
+      <h2>🎯 Open Positions</h2>
+      <div id="positionsBody"><span style="color:#5a6a8a;">No open positions</span></div>
     </div>
 
     <div class="section" id="tradesSection">
@@ -201,13 +223,15 @@
       }
 
       try {
-        const [systemStatus, tradesData, tradingHealth] = await Promise.all([
+        const [systemStatus, tradesData, tradingHealth, positionsData, signalsData] = await Promise.all([
           fetchJSON('/status').catch(() => ({})),
           fetchJSON('/trades').catch(() => ({trades:[]})),
           fetchJSON('http://127.0.0.1:8900/health').catch(() => ({})),
+          fetchJSON('http://127.0.0.1:8900/positions').catch(() => ({positions:[]})),
+          fetchJSON('http://127.0.0.1:8900/signals').catch(() => ({signals:[]})),
         ]);
 
-        DATA = { systemStatus, tradesData, tradingHealth };
+        DATA = { systemStatus, tradesData, tradingHealth, positionsData, signalsData };
 
         if (isFirstLoad) {
           isFirstLoad = false;
@@ -269,8 +293,89 @@
       document.getElementById('uptimeVal').textContent = fmtUptime(uptime);
       document.getElementById('serverVersion').textContent = 'Coordinator ' + (ss.coordinator?.version || '?');
 
+      // Circuit Breaker — in-place
+      const cb = accountInfo.circuit_breaker || tradingComp.details?.circuit_breaker || {};
+      const isPaused = cb.is_paused || healthResp.paused || false;
+      const dailyPnl = cb.current_pnl || 0;
+      const lossPct = cb.loss_pct || 0;
+      const lossLimit = cb.loss_limit_pct || 5;
+      const dailyTrades = accountInfo.daily_trade_count || 0;
+
+      document.getElementById('cbStatus').textContent = isPaused ? '⏸️ PAUSED' : '✅ Active';
+      document.getElementById('cbStatus').style.color = isPaused ? '#fca5a5' : '#6ee7b7';
+      document.getElementById('cbDetail').innerHTML = `
+        <div class="cb-row"><span class="cb-label">Daily PnL</span><span class="cb-val" style="color:${dailyPnl >= 0 ? '#6ee7b7' : '#fca5a5'}">${dailyPnl >= 0 ? '+' : ''}${Number(dailyPnl).toFixed(2)} USDT (${lossPct.toFixed(2)}%)</span></div>
+        <div class="cb-row"><span class="cb-label">Loss Limit</span><span class="cb-val">${lossLimit}%</span></div>
+        <div class="cb-row"><span class="cb-label">Trades Today</span><span class="cb-val">${dailyTrades} / 50</span></div>
+      `;
+
       // Versions — in-place
       document.getElementById('versionList').innerHTML = '<span style="color:#5a6a8a;">Waiting for first strategy deployment</span>';
+
+      // Market Regime — in-place
+      const regime = ss.components?.trading_server?.details?.regime || {};
+      const regimeKeys = Object.keys(regime);
+      const rb = document.getElementById('regimeBody');
+      if (regimeKeys.length === 0) {
+        rb.innerHTML = '<span style="color:#5a6a8a;">⏳ Waiting for 1h candle close...</span>';
+      } else {
+        rb.innerHTML = regimeKeys.map(sym => {
+          const r = (regime[sym] || 'unknown').toLowerCase();
+          const color = r === 'trending' ? '#6ee7b7' : r === 'ranging' ? '#fde68a' : r === 'volatile' ? '#fca5a5' : '#5a6a8a';
+          const bg = r === 'trending' ? '#064e3b' : r === 'ranging' ? '#3c2e00' : r === 'volatile' ? '#450a0a' : '#1e293b';
+          return `<span class="mini-card-sm" style="border-color:${color}40;">
+            <span style="font-weight:600;">${sym}</span>
+            <span style="background:${bg};color:${color};padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;">${r}</span>
+          </span>`;
+        }).join('');
+      }
+
+      // Recent Signals
+      const signals = (DATA.signalsData && DATA.signalsData.signals) || [];
+      const sb = document.getElementById('signalBody');
+      if (signals.length === 0) {
+        sb.innerHTML = '';
+      } else {
+        const last = signals[signals.length - 1];
+        const dir = (last.direction || '?').toUpperCase();
+        const dirColor = dir === 'LONG' ? '#6ee7b7' : '#fca5a5';
+        const dirBg = dir === 'LONG' ? '#064e3b' : '#450a0a';
+        sb.innerHTML = `<span class="mini-card-sm" style="gap:8px;">
+          🚦 Last Signal: <span style="background:${dirBg};color:${dirColor};padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;">${dir}</span>
+          <span style="color:#94a3b8;">${last.symbol || '?'}</span>
+          <span style="color:#e2e8f0;">${(last.confidence * 100).toFixed(0)}%</span>
+          <span style="color:#5a6a8a;font-size:11px;">${(last.reason || '').substring(0, 80)}</span>
+        </span>`;
+      }
+
+      // Open Positions — in-place
+      const positions = (DATA.positionsData && DATA.positionsData.positions) || [];
+      const pb = document.getElementById('positionsBody');
+      if (positions.length === 0) {
+        pb.innerHTML = '<span style="color:#5a6a8a;">No open positions</span>';
+      } else {
+        pb.innerHTML = `<div style="overflow-x:auto;"><table>
+          <thead><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Size</th><th>PnL</th><th>Stop Loss</th><th>Take Profit</th><th>Status</th></tr></thead>
+          <tbody>${positions.map(p => {
+            const side = (p.side || '').toUpperCase();
+            const sideColor = side === 'BUY' || side === 'LONG' ? '#6ee7b7' : '#fca5a5';
+            const upnl = p.unrealized_pnl || 0;
+            const trailing = p.metadata?.trailing_active;
+            const slStr = p.stop_loss ? '$' + Number(p.stop_loss).toFixed(2) : '—';
+            const tpStr = p.take_profit ? '$' + Number(p.take_profit).toFixed(2) : '—';
+            return `<tr>
+              <td style="font-weight:600;">${p.symbol || '—'}</td>
+              <td><span class="badge ${side === 'BUY' || side === 'LONG' ? 'green' : 'red'}" style="font-size:10px;">${side}</span></td>
+              <td>${p.entry_price ? '$' + Number(p.entry_price).toFixed(2) : '—'}</td>
+              <td>${p.quantity ? Number(p.quantity).toFixed(4) : '—'}</td>
+              <td style="color:${upnl >= 0 ? '#6ee7b7' : '#fca5a5'};font-weight:600;">${upnl >= 0 ? '+' : ''}${Number(upnl).toFixed(2)}</td>
+              <td style="color:#fca5a5;">${slStr}</td>
+              <td style="color:#6ee7b7;">${tpStr}</td>
+              <td>${trailing ? '<span class="badge blue">Trailing</span>' : '<span class="badge yellow">Active</span>'}</td>
+            </tr>`;
+          }).join('')}</tbody>
+        </table></div>`;
+      }
 
       // Trades → Recent Activity — only rebuild the table body
       const tb = document.getElementById('tradesBody');
