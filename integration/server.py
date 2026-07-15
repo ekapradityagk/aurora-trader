@@ -16,6 +16,7 @@ and wallet scanner (8902) via the Coordinator.
 from __future__ import annotations
 
 import asyncio
+import aiohttp
 import json
 import signal
 import time
@@ -135,6 +136,8 @@ class IntegrationServer:
         # State
         self._running = False
         self._start_time: float = 0.0
+        # HTTP session for proxying to trading server
+        self._proxy_session: Optional[aiohttp.ClientSession] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -156,6 +159,7 @@ class IntegrationServer:
             await self._winrate_db.initialize()
             await self._rollback.initialize()
             await self._coordinator.start()
+            self._proxy_session = aiohttp.ClientSession()
             self._log.info("Sub-systems initialised")
 
             # 2. Start HTTP server
@@ -191,6 +195,11 @@ class IntegrationServer:
         # Stop coordinator
         await self._coordinator.stop()
 
+        # Close proxy session
+        if self._proxy_session:
+            await self._proxy_session.close()
+            self._proxy_session = None
+
         self._log.info("Integration Server stopped")
 
     # ------------------------------------------------------------------
@@ -219,6 +228,9 @@ class IntegrationServer:
         self._app.router.add_post("/winrate/compare", self._handle_winrate_compare)
         self._app.router.add_get("/trades", self._handle_trades)
         self._app.router.add_get("/status", self._handle_status)
+        self._app.router.add_get("/api/trading/health", self._handle_proxy_health)
+        self._app.router.add_get("/api/trading/positions", self._handle_proxy_positions)
+        self._app.router.add_get("/api/trading/signals", self._handle_proxy_signals)
         self._app.router.add_get("/api/dashboard", self._handle_dashboard)
 
         self._runner = web.AppRunner(self._app)
@@ -699,8 +711,39 @@ class IntegrationServer:
         return web.json_response(status)
 
     # ------------------------------------------------------------------
-    # Handlers: Dashboard
+    # Handlers: Proxy to Trading Server
     # ------------------------------------------------------------------
+
+    TRADING_BASE = "http://127.0.0.1:8900"
+
+    async def _proxy_to_trading(self, path: str, request: web.Request) -> web.Response:
+        """Forward a request to the trading server and return its response."""
+        if not self._proxy_session:
+            return web.json_response({"error": "Proxy not available"}, status=503)
+        try:
+            url = f"{self.TRADING_BASE}{path}"
+            qs = request.query_string
+            if qs:
+                url += f"?{qs}"
+            async with self._proxy_session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                data = await resp.json()
+                return web.json_response(data, status=resp.status)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "Trading server timeout"}, status=504)
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+
+    async def _handle_proxy_health(self, request: web.Request) -> web.Response:
+        """GET /api/trading/health → trading server /health."""
+        return await self._proxy_to_trading("/health", request)
+
+    async def _handle_proxy_positions(self, request: web.Request) -> web.Response:
+        """GET /api/trading/positions → trading server /positions."""
+        return await self._proxy_to_trading("/positions", request)
+
+    async def _handle_proxy_signals(self, request: web.Request) -> web.Response:
+        """GET /api/trading/signals → trading server /signals."""
+        return await self._proxy_to_trading("/signals", request)
 
     async def _handle_dashboard(self, request: web.Request) -> web.Response:
         """GET /dashboard — aggregated dashboard view of the entire system.

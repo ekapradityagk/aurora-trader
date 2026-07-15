@@ -248,9 +248,9 @@
         const [systemStatus, tradesData, tradingHealth, positionsData, signalsData] = await Promise.all([
           fetchJSON('/status').catch(() => ({})),
           fetchJSON('/trades').catch(() => ({trades:[]})),
-          fetchJSON('http://127.0.0.1:8900/health').catch(() => ({})),
-          fetchJSON('http://127.0.0.1:8900/positions').catch(() => ({positions:[]})),
-          fetchJSON('http://127.0.0.1:8900/signals').catch(() => ({signals:[]})),
+          fetchJSON('/api/trading/health').catch(() => ({})),
+          fetchJSON('/api/trading/positions').catch(() => ({positions:[]})),
+          fetchJSON('/api/trading/signals').catch(() => ({signals:[]})),
         ]);
 
         DATA = { systemStatus, tradesData, tradingHealth, positionsData, signalsData };
