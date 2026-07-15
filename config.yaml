@@ -212,7 +212,7 @@ learning_server:
 # Trading Server
 # ---------------------------------------------------------------------------
 trading_server:
-  host: "127.0.0.1"
+  host: "0.0.0.0"
   port: 8900
   database:
     path: "data/trading.db"
@@ -225,7 +225,7 @@ trading_server:
 # Integration Server (Git versioning, winrate DB, rollback API)
 # ---------------------------------------------------------------------------
 integration:
-  host: "127.0.0.1"
+  host: "0.0.0.0"
   port: 8903
   git:
     auto_commit: true
