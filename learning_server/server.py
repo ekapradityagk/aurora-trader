@@ -42,6 +42,53 @@ HYPEROPT_INTERVAL_HOURS = 168  # 7 days (weekly)
 
 
 # ---------------------------------------------------------------------------
+# Middleware (module-level, aiohttp compatible)
+# ---------------------------------------------------------------------------
+
+
+@web.middleware
+async def _cors_middleware(
+    request: web.Request, handler: Any
+) -> web.StreamResponse:
+    """Add CORS headers to all responses."""
+    if request.method == "OPTIONS":
+        return web.Response(
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            }
+        )
+    try:
+        response = await handler(request)
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        return response
+    except web.HTTPException as exc:
+        exc.headers["Access-Control-Allow-Origin"] = "*"
+        raise
+
+
+@web.middleware
+async def _error_middleware(
+    request: web.Request, handler: Any
+) -> web.StreamResponse:
+    """Catch unhandled exceptions and return JSON error responses."""
+    try:
+        return await handler(request)
+    except web.HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            f"Unhandled error on {request.method} {request.path}: {exc}",
+            exc_info=True,
+        )
+        return web.json_response(
+            {"error": "Internal server error", "detail": str(exc)},
+            status=500,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Learning Server
 # ---------------------------------------------------------------------------
 
@@ -199,52 +246,6 @@ class LearningServer:
         await site.start()
 
     # ------------------------------------------------------------------
-    # Middleware (module-level for aiohttp compatibility)
-    # ------------------------------------------------------------------
-
-
-@web.middleware
-async def _cors_middleware(
-    request: web.Request, handler: Any
-) -> web.StreamResponse:
-    """Add CORS headers to all responses."""
-    if request.method == "OPTIONS":
-        return web.Response(
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type, Authorization",
-            }
-        )
-    try:
-        response = await handler(request)
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        return response
-    except web.HTTPException as exc:
-        exc.headers["Access-Control-Allow-Origin"] = "*"
-        raise
-
-
-@web.middleware
-async def _error_middleware(
-    request: web.Request, handler: Any
-) -> web.StreamResponse:
-    """Catch unhandled exceptions and return JSON error responses."""
-    try:
-        return await handler(request)
-    except web.HTTPException:
-        raise
-    except Exception as exc:
-        logger.error(
-            f"Unhandled error on {request.method} {request.path}: {exc}",
-            exc_info=True,
-        )
-        return web.json_response(
-            {"error": "Internal server error", "detail": str(exc)},
-            status=500,
-        )
-
-# ---------------------------------------------------------------------------
     # HTTP Handlers
     # ------------------------------------------------------------------
 
