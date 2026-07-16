@@ -28,6 +28,7 @@ from learning_server.hyperopt import HyperoptOptimizer, OptimizationResult
 from learning_server.regime import RegimeDetector, RegimeResult
 from learning_server.analyzer import TradeAnalyzer, AnalysisReport
 from learning_server.strategy_selector import StrategySelector, SelectionRecord
+from learning_server.pair_ranker import PairRanker
 
 logger = get_logger("learning_server.server")
 
@@ -74,6 +75,7 @@ class LearningServer:
         self._regime_detector = RegimeDetector()
         self._analyzer = TradeAnalyzer()
         self._selector = StrategySelector()
+        self._pair_ranker = PairRanker()
 
         # HTTP server state
         self._app: Optional[web.Application] = None
@@ -189,6 +191,7 @@ class LearningServer:
         self._app.router.add_get("/strategy", self._handle_strategy)
         self._app.router.add_post("/strategy/select", self._handle_strategy_select)
         self._app.router.add_get("/selections", self._handle_selections)
+        self._app.router.add_get("/api/pair-rankings", self._handle_pair_rankings)
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -499,6 +502,54 @@ class LearningServer:
                 for r in records
             ],
         })
+
+    async def _handle_pair_rankings(self, request: web.Request) -> web.Response:
+        """GET /api/pair-rankings — get ranked pair performance.
+
+        Query params:
+            window_days (int, default 7): look-back window
+            min_trades (int, default 2): minimum trades to qualify
+        """
+        window_days = int(request.query.get("window_days", "7"))
+        min_trades = int(request.query.get("min_trades", "2"))
+        try:
+            rankings = await self._pair_ranker.get_pair_rankings(
+                window_days=window_days,
+                min_trades=min_trades,
+            )
+            recommended = [r.symbol for r in rankings[:min(len(rankings), 6)]]
+            retired = await self._pair_ranker.get_retired_pairs(
+                window_days=window_days,
+                min_trades=min_trades,
+            )
+            return web.json_response({
+                "rankings": [
+                    {
+                        "symbol": r.symbol,
+                        "total_trades": r.total_trades,
+                        "wins": r.wins,
+                        "losses": r.losses,
+                        "total_pnl": r.total_pnl,
+                        "win_rate": r.win_rate,
+                        "avg_pnl": r.avg_pnl,
+                        "profit_factor": r.profit_factor,
+                        "sharpe": r.sharpe,
+                        "score": r.score,
+                        "trend": r.trend,
+                    }
+                    for r in rankings
+                ],
+                "recommended": recommended,
+                "retired": retired,
+                "window_days": window_days,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as exc:
+            self._log.error(f"Pair ranking failed: {exc}", exc_info=True)
+            return web.json_response(
+                {"error": "Pair ranking failed", "detail": str(exc)},
+                status=500,
+            )
 
     # ------------------------------------------------------------------
     # Background scheduler

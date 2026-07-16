@@ -232,6 +232,7 @@ class IntegrationServer:
         self._app.router.add_get("/api/trading/positions", self._handle_proxy_positions)
         self._app.router.add_get("/api/trading/signals", self._handle_proxy_signals)
         self._app.router.add_get("/api/dashboard", self._handle_dashboard)
+        self._app.router.add_get("/api/pair-rankings", self._handle_proxy_pair_rankings)
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -752,6 +753,29 @@ class IntegrationServer:
     async def _handle_proxy_signals(self, request: web.Request) -> web.Response:
         """GET /api/trading/signals → trading server /signals."""
         return await self._proxy_to_trading("/signals", request)
+
+    LEARNING_BASE = "http://127.0.0.1:8901"
+
+    async def _proxy_to_learning(self, path: str, request: web.Request) -> web.Response:
+        """Forward a request to the learning server and return its response."""
+        if not self._proxy_session:
+            return web.json_response({"error": "Proxy not available"}, status=503)
+        try:
+            url = f"{self.LEARNING_BASE}{path}"
+            qs = request.query_string
+            if qs:
+                url += f"?{qs}"
+            async with self._proxy_session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                data = await resp.json()
+                return web.json_response(data, status=resp.status)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "Learning server timeout"}, status=504)
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+
+    async def _handle_proxy_pair_rankings(self, request: web.Request) -> web.Response:
+        """GET /api/pair-rankings → learning server /api/pair-rankings."""
+        return await self._proxy_to_learning("/api/pair-rankings", request)
 
     async def _handle_dashboard(self, request: web.Request) -> web.Response:
         """GET /dashboard — aggregated dashboard view of the entire system.

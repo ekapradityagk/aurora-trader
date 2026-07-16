@@ -196,7 +196,7 @@ wallet_scanner:
 # Learning Server (Bayesian hyperopt + regime detection)
 # ---------------------------------------------------------------------------
 learning_server:
-  enabled: false
+  enabled: true
   api_base_url: "http://127.0.0.1:8901"
   optuna:
     n_trials: 100

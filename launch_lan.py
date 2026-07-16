@@ -18,6 +18,14 @@ if _env_path.is_file():
 # Set host to all interfaces
 os.environ["AURORA_HOST"] = "0.0.0.0"
 
+async def learning_main():
+    """Start learning server on port 8901."""
+    from learning_server.server import LearningServer
+    server = LearningServer(host="0.0.0.0", port=8901)
+    await server.start()
+    while server._running:
+        await asyncio.sleep(1)
+
 async def main():
     from trading_server.server import main as trading_main
     from integration.server import main as integration_main
@@ -35,16 +43,21 @@ async def main():
         if "integration" not in cfg.data:
             cfg.data["integration"] = {}
         cfg.data["integration"]["host"] = "0.0.0.0"
+        if "learning_server" not in cfg.data:
+            cfg.data["learning_server"] = {}
+        cfg.data["learning_server"]["host"] = "0.0.0.0"
         return cfg
     
     cfg_mod.load_config = patched_load
     
-    print("🚀 Aurora Trader — Starting both servers on 0.0.0.0 (LAN accessible)")
+    print("🚀 Aurora Trader — Starting all servers on 0.0.0.0 (LAN accessible)")
+    print("   Learning Server  → http://0.0.0.0:8901")
     print("   Trading Server   → http://0.0.0.0:8900")
     print("   Integration      → http://0.0.0.0:8903")
     print("   Dashboard        → http://0.0.0.0:8903/dashboard")
     
     await asyncio.gather(
+        learning_main(),
         trading_main(),
         integration_main()
     )
