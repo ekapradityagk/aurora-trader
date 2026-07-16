@@ -253,13 +253,24 @@
       }
 
       try {
-        const [systemStatus, tradesData, tradingHealth, positionsData, signalsData] = await Promise.all([
-          fetchJSON('/status').catch(() => ({})),
-          fetchJSON('/trades').catch(() => ({trades:[]})),
-          fetchJSON('/api/trading/health').catch(() => ({})),
-          fetchJSON('/api/trading/positions').catch(() => ({positions:[]})),
-          fetchJSON('/api/trading/signals').catch(() => ({signals:[]})),
+        // Global 10-second timeout — ALWAYS shows something
+        const FETCH_TIMEOUT = 10000;
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Some API endpoints timed out')), FETCH_TIMEOUT)
+        );
+
+        const results = await Promise.race([
+          Promise.all([
+            fetchJSON('/status').catch(() => ({})),
+            fetchJSON('/trades').catch(() => ({trades:[]})),
+            fetchJSON('/api/trading/health').catch(() => ({})),
+            fetchJSON('/api/trading/positions').catch(() => ({positions:[]})),
+            fetchJSON('/api/trading/signals').catch(() => ({signals:[]})),
+          ]),
+          timeoutPromise,
         ]);
+
+        const [systemStatus, tradesData, tradingHealth, positionsData, signalsData] = results;
 
         DATA = { systemStatus, tradesData, tradingHealth, positionsData, signalsData };
 
@@ -272,13 +283,14 @@
         updateDashboard();
       } catch (err) {
         if (isFirstLoad) {
+          isFirstLoad = false;
           document.getElementById('loadingState').style.display = 'none';
           const errEl = document.getElementById('errorState');
           errEl.style.display = 'block';
-          errEl.innerHTML = `<p style="font-size:18px;margin-bottom:12px;">⚠️ Connection Error</p>
-            <p>${err.message}</p>
-            <p style="margin-top:12px;">Make sure the Aurora Trader servers are running on ports 8900-8903</p>
-            <button class="refresh-btn" style="margin-top:20px;" onclick="refreshData()">🔄 Retry</button>`;
+          errEl.innerHTML = `<p style="font-size:18px;margin-bottom:12px;">⚠️ ${err.message}</p>
+            <p style="font-size:13px;color:#94a3b8;margin-bottom:4px;">Tried fetching: /status, /trades, /api/trading/health, /api/trading/positions, /api/trading/signals</p>
+            <p style="font-size:13px;color:#94a3b8;margin-bottom:16px;">Make sure the Aurora Trader servers are running on ports 8900-8903</p>
+            <button class="refresh-btn" style="margin-top:8px;" onclick="refreshData()">🔄 Retry</button>`;
         }
         // Subsequent errors: keep old data quietly, no flash
       }
