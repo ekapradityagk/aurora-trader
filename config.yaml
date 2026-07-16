@@ -214,6 +214,13 @@ learning_server:
 trading_server:
   host: "0.0.0.0"
   port: 8900
+  symbols:
+    - "BTCUSDT"
+    - "ETHUSDT"
+    - "SOLUSDT"
+    - "SUIUSDT"
+    - "NEARUSDT"
+    - "BNBUSDT"
   database:
     path: "data/trading.db"
   websocket:

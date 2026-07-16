@@ -155,6 +155,11 @@
           <div id="cbDetail" class="label"></div>
         </div>
       </div>
+      <div class="card">
+        <h3>💰 Monthly Fees</h3>
+        <div class="value" id="totalFees" style="font-size:20px;color:#fca5a5;">—</div>
+        <div id="feeBreakdown" class="label"></div>
+      </div>
     </div>
 
     <div class="section" id="versionSection">
@@ -262,7 +267,7 @@
         const results = await Promise.race([
           Promise.all([
             fetchJSON('/status').catch(() => ({})),
-            fetchJSON('/trades').catch(() => ({trades:[]})),
+            fetchJSON('/trades?limit=500').catch(() => ({trades:[]})),
             fetchJSON('/api/trading/health').catch(() => ({})),
             fetchJSON('/api/trading/positions').catch(() => ({positions:[]})),
             fetchJSON('/api/trading/signals').catch(() => ({signals:[]})),
@@ -350,6 +355,31 @@
         <div class="cb-row"><span class="cb-label">Loss Limit</span><span class="cb-val">${lossLimit}%</span></div>
         <div class="cb-row"><span class="cb-label">Trades Today</span><span class="cb-val">${dailyTrades} / 50</span></div>
       `;
+
+      // Monthly Fees — compute from trades data
+      const allTrades = (DATA.tradesData && DATA.tradesData.trades) || [];
+      const now = new Date();
+      const thisMonth = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0');
+      let monthCommissions = 0, monthFunding = 0, monthCount = 0;
+      allTrades.forEach(t => {
+        const date = t.closed_at || t.created_at || t.timestamp || '';
+        if (date.startsWith(thisMonth)) {
+          if (t.activity_type === 'commission') {
+            monthCommissions += Math.abs(t.pnl || 0);
+            monthCount++;
+          } else if (t.activity_type === 'funding_fee') {
+            monthFunding += Math.abs(t.pnl || 0);
+            monthCount++;
+          }
+        }
+      });
+      const totalCost = monthCommissions + monthFunding;
+      document.getElementById('totalFees').textContent = totalCost > 0
+        ? '$' + totalCost.toFixed(2)
+        : (monthCount > 0 ? '$0.00' : '—');
+      document.getElementById('feeBreakdown').innerHTML = monthCount > 0
+        ? `Commissions: $${monthCommissions.toFixed(2)} · Funding: $${monthFunding.toFixed(2)}`
+        : 'No fees this month';
 
       // Versions — in-place
       document.getElementById('versionList').innerHTML = '<span style="color:#5a6a8a;">Waiting for first strategy deployment</span>';
