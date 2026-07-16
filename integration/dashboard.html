@@ -374,7 +374,7 @@
           let bestConf = 0;
           let bestDir = '';
           let hasSignal = false;
-          Object.values(strategies).forEach((s: any) => {
+          Object.values(strategies).forEach((s) => {
             if (s.enabled && s.signal && s.confidence > bestConf) {
               bestConf = s.confidence;
               bestDir = s.direction || '';
@@ -418,7 +418,7 @@
             const inds = s.indicators || {};
             const indKeys = Object.keys(inds).filter(k => k !== 'close');
             const chips = indKeys.slice(0, 6).map(k => {
-              const v = typeof inds[k] === 'number' ? (inds[k] as number).toFixed(2) : inds[k];
+              const v = typeof inds[k] === 'number' ? inds[k].toFixed(2) : inds[k];
               return `<span class="indicator-chip">${k.replace(/_/g,' ')}: <span class="val">${v}</span></span>`;
             }).join('');
 
