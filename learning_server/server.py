@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from aiohttp import web
+import aiohttp
 
 from shared.config import load_config
 from shared.logger import get_logger
@@ -332,11 +333,34 @@ class LearningServer:
         timeframe = request.query.get("timeframe", "1h")
 
         try:
-            # Attempt to detect from cache; if no cached data exists,
-            # we return a fallback indicating no data
+            # Fetch OHLCV data from Binance public API
+            limit = 100  # enough for indicators
+            import aiohttp as _
+            binance_url = (
+                f"https://api.binance.com/api/v3/klines"
+                f"?symbol={symbol}&interval={timeframe}&limit={limit}"
+            )
+            async with aiohttp.ClientSession() as session:
+                async with session.get(binance_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"Binance API returned HTTP {resp.status}")
+                    raw = await resp.json()
+
+            # Convert to OHLCV dict format expected by regime detector
+            ohlcv = []
+            for k in raw:
+                ohlcv.append({
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5]),
+                })
+
             result = await self._regime_detector.detect(
                 symbol=symbol,
                 timeframe=timeframe,
+                ohlcv=ohlcv,
             )
             self._last_regime = result
 
