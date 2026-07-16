@@ -249,7 +249,15 @@ class IntegrationServer:
         try:
             with open(html_path, "r") as f:
                 html = f.read()
-            return web.Response(text=html, content_type="text/html")
+            return web.Response(
+                text=html,
+                content_type="text/html",
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
         except FileNotFoundError:
             return web.Response(
                 text="<h1>Aurora Trader</h1><p>Dashboard HTML not found. Run from project root.</p>",
