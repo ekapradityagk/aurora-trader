@@ -206,9 +206,17 @@
     let isFirstLoad = true;
 
     async function fetchJSON(url) {
-      const resp = await fetch(url);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      return resp.json();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      try {
+        const resp = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return resp.json();
+      } catch (err) {
+        clearTimeout(timeout);
+        throw err;
+      }
     }
 
     function fmtTime(ts) {
