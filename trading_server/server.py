@@ -777,11 +777,31 @@ class TradingServer:
                 existing.current_price = mark_price
                 existing.unrealized_pnl = unrealized_pnl
                 existing.liquidation_price = liq
+                # Set default SL/TP if missing (e.g. from earlier sync that had no ATR)
+                if existing.stop_loss is None:
+                    sl_pct = Decimal("0.02")
+                    existing.stop_loss = entry_price * (Decimal("1") - sl_pct) if side == OrderSide.BUY else entry_price * (Decimal("1") + sl_pct)
+                if existing.take_profit is None:
+                    tp_pct = Decimal("0.03")
+                    existing.take_profit = entry_price * (Decimal("1") + tp_pct) if side == OrderSide.BUY else entry_price * (Decimal("1") - tp_pct)
+                # Set default ATR in metadata if missing (needed for break-even/trailing logic)
+                meta = existing.metadata or {}
+                if not meta.get("atr") or meta.get("atr") == "0":
+                    meta["atr"] = str(entry_price * Decimal("0.015"))  # ~1.5% of price as ATR estimate
+                    existing.metadata = meta
                 self._log.info(
                     f"  ↻ {symbol}: updated from exchange "
-                    f"(price=${float(mark_price):.2f}, PnL={float(unrealized_pnl):+.2f})"
+                    f"(price=${float(mark_price):.2f}, PnL={float(unrealized_pnl):+.2f}, "
+                    f"sl=${float(existing.stop_loss):.2f}, tp=${float(existing.take_profit):.2f})"
                 )
                 continue
+
+            # Default SL at 2%, TP at 3%, ATR estimate at 1.5% of entry
+            sl_pct = Decimal("0.02")
+            tp_pct = Decimal("0.03")
+            atr_est = entry_price * Decimal("0.015")
+            stop_loss = entry_price * (Decimal("1") - sl_pct) if side == OrderSide.BUY else entry_price * (Decimal("1") + sl_pct)
+            take_profit = entry_price * (Decimal("1") + tp_pct) if side == OrderSide.BUY else entry_price * (Decimal("1") - tp_pct)
 
             # Build a Position from exchange data
             pos = Position(
@@ -797,10 +817,13 @@ class TradingServer:
                 leverage=leverage,
                 margin_type="isolated",
                 unrealized_pnl=unrealized_pnl,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
                 entry_time=datetime.now(timezone.utc),
                 metadata={
                     "source": "exchange_sync",
                     "exchange_data": True,
+                    "atr": str(atr_est),
                 },
             )
             self._positions[symbol] = pos
