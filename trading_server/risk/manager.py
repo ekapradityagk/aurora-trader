@@ -264,6 +264,9 @@ class RiskManager:
             entry, atr, position.side
         )
 
+        # Fixed tight trailing distance: 0.5% of entry price
+        tight_trail_distance = entry * Decimal("0.005")
+
         # Check break-even activation (+1R)
         if self.should_activate_break_even(position, current_price):
             if position.side == OrderSide.BUY:
@@ -282,9 +285,8 @@ class RiskManager:
                 )
                 # Check trailing activation (+2R)
                 if self.should_activate_trailing(position, current_price):
-                    trail_distance = atr * Decimal("2")
                     trail_stop = self.update_trailing_stop(
-                        be_stop, current_price, position.side, trail_distance
+                        be_stop, current_price, position.side, tight_trail_distance
                     )
                     self._log.trade(
                         "TRAILING_STOP",
@@ -298,9 +300,8 @@ class RiskManager:
 
         # If trailing already active, continue updating
         if position.metadata and position.metadata.get("trailing_active"):
-            trail_distance = atr * Decimal("2")
             trail_stop = self.update_trailing_stop(
-                current_sl, current_price, position.side, trail_distance
+                current_sl, current_price, position.side, tight_trail_distance
             )
             return trail_stop, "trailing"
 

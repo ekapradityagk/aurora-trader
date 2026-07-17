@@ -781,9 +781,8 @@ class TradingServer:
                 if existing.stop_loss is None:
                     sl_pct = Decimal("0.02")
                     existing.stop_loss = entry_price * (Decimal("1") - sl_pct) if side == OrderSide.BUY else entry_price * (Decimal("1") + sl_pct)
-                if existing.take_profit is None:
-                    tp_pct = Decimal("0.03")
-                    existing.take_profit = entry_price * (Decimal("1") + tp_pct) if side == OrderSide.BUY else entry_price * (Decimal("1") - tp_pct)
+                # No hard TP — trailing stop handles exits
+                existing.take_profit = None
                 # Set default ATR in metadata if missing (needed for break-even/trailing logic)
                 meta = existing.metadata or {}
                 if not meta.get("atr") or meta.get("atr") == "0":
@@ -796,12 +795,10 @@ class TradingServer:
                 )
                 continue
 
-            # Default SL at 2%, TP at 3%, ATR estimate at 1.5% of entry
+            # Default SL at 2%, no hard TP (trailing handles exits), ATR estimate at 1.5% of entry
             sl_pct = Decimal("0.02")
-            tp_pct = Decimal("0.03")
             atr_est = entry_price * Decimal("0.015")
             stop_loss = entry_price * (Decimal("1") - sl_pct) if side == OrderSide.BUY else entry_price * (Decimal("1") + sl_pct)
-            take_profit = entry_price * (Decimal("1") + tp_pct) if side == OrderSide.BUY else entry_price * (Decimal("1") - tp_pct)
 
             # Build a Position from exchange data
             pos = Position(
@@ -818,7 +815,7 @@ class TradingServer:
                 margin_type="isolated",
                 unrealized_pnl=unrealized_pnl,
                 stop_loss=stop_loss,
-                take_profit=take_profit,
+                take_profit=None,
                 entry_time=datetime.now(timezone.utc),
                 metadata={
                     "source": "exchange_sync",
@@ -1392,35 +1389,12 @@ class TradingServer:
         except Exception as exc:
             self._log.warning(f"Failed to place SL for {symbol}: {exc}")
 
-        # === Place take-profit order (3% above entry for longs, below for shorts) ===
-        tp_pct = Decimal("0.03")  # 3% take profit
+        # === Take profit handled by trailing stop (tight trail at 0.5% below peak) ===
+        # No hard TP placed — let winners run with trailing protection
         tp_order_id = None
-        try:
-            if side_str == "BUY":
-                tp_price = float(entry_price * (Decimal("1") + tp_pct))
-                tp_side = "SELL"
-            else:
-                tp_price = float(entry_price * (Decimal("1") - tp_pct))
-                tp_side = "BUY"
-
-            # Use TAKE_PROFIT_LIMIT on Binance Futures
-            tp_params = {
-                "symbol": symbol,
-                "side": tp_side,
-                "quantity": float(quantity),
-                "price": tp_price,
-                "stopPrice": tp_price,
-                "type": "TAKE_PROFIT_MARKET",
-            }
-            client = await self._rest._ensure_client()
-            tp_result = await client.futures_create_order(**tp_params)
-            tp_order_id = str(tp_result.get("orderId", ""))
-            self._log.info(
-                f"🎯 TP placed for {symbol} at ${tp_price:.2f} "
-                f"(order: {tp_order_id})"
-            )
-        except Exception as exc:
-            self._log.warning(f"Failed to place TP for {symbol}: {exc}")
+        self._log.info(
+            f"📈 No hard TP for {symbol} — tight trailing stop will lock profits"
+        )
 
         # === Record position ===
         from shared.models import OrderSide as OS, PositionStatus as PS
