@@ -204,7 +204,7 @@ class RiskManager:
         position: Position,
         current_price: Decimal,
     ) -> bool:
-        """Check if the position has reached +2R and should trail."""
+        """Check if the position has reached +1.5R (+3% price) and should trail."""
         if not position.is_open or position.entry_price == 0:
             return False
 
@@ -219,7 +219,7 @@ class RiskManager:
         else:
             profit = entry - current_price
 
-        return profit >= risk_per_unit * 2
+        return profit >= risk_per_unit * Decimal("1.5")
 
     def update_trailing_stop(
         self,
@@ -283,7 +283,7 @@ class RiskManager:
                     entry=str(entry),
                     new_stop=str(be_stop),
                 )
-                # Check trailing activation (+2R)
+                # Check trailing activation (+1.5R = +3% price)
                 if self.should_activate_trailing(position, current_price):
                     trail_stop = self.update_trailing_stop(
                         be_stop, current_price, position.side, tight_trail_distance
