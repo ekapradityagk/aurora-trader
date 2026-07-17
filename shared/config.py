@@ -177,9 +177,10 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "risk_management": {
         "global": {
             "max_position_size_usd": 10000.0,
-            "max_leverage": 5,
+            "max_leverage": 20,
             "max_daily_trades": 50,
-            "max_open_positions": 5,
+            "max_open_positions": 6,
+            "risk_per_trade_pct": 5.0,
             "max_drawdown_pct": 15.0,
             "daily_loss_limit_pct": 5.0,
             "max_slippage_pct": 0.1,
@@ -447,6 +448,10 @@ class Config:
         return int(self.risk_global.get("max_open_positions", 5))
 
     @property
+    def risk_per_trade_pct(self) -> float:
+        return float(self.risk_global.get("risk_per_trade_pct", 2.0))
+
+    @property
     def max_drawdown_pct(self) -> float:
         return float(self.risk_global.get("max_drawdown_pct", 15.0))
 
@@ -527,6 +532,31 @@ class Config:
         return self.data.get("trading_server", {}).get("websocket", {})
 
     # ------------------------------------------------------------------
+    # Pair universe
+    # ------------------------------------------------------------------
+
+    @property
+    def pair_universe(self) -> Dict[str, Any]:
+        return self.data.get("pair_universe", {})
+
+    @property
+    def pair_universe_candidates(self) -> List[str]:
+        return self.pair_universe.get("candidates", [])
+
+    @property
+    def pair_universe_active_count(self) -> int:
+        return int(self.pair_universe.get("active_count", 6))
+
+    @property
+    def pair_universe_lookback_days(self) -> int:
+        return int(self.pair_universe.get("lookback_days", 7))
+
+    @property
+    def pair_universe_min_volume(self) -> float:
+        return float(self.pair_universe.get("min_volume_usdt", 50_000_000))
+
+    # ------------------------------------------------------------------
+    # Integration
     # Integration server
     # ------------------------------------------------------------------
 

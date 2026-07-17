@@ -165,6 +165,13 @@ class TradingServer:
                 f"Account balance: {self._account_balance:.2f} USDT"
             )
 
+            # 3b. Sync open positions from Binance (so we never lose track
+            #     of existing positions after a restart!)
+            await self._sync_positions_from_exchange()
+            self._log.info(
+                f"Exchange positions synced: {len([p for p in self._positions.values() if p.is_open])} open"
+            )
+
             # 4. Initialise strategies
             self._init_strategies()
             self._log.info(
@@ -730,6 +737,85 @@ class TradingServer:
             )
 
     # ------------------------------------------------------------------
+    # Exchange Position Sync — fetch live positions from Binance on startup
+    # ------------------------------------------------------------------
+
+    async def _sync_positions_from_exchange(self) -> None:
+        """Fetch all open positions from Binance and populate self._positions.
+
+        This ensures positions that were opened *before* a server restart
+        (or by manual trading on the exchange) are still tracked locally.
+        """
+        if not self._rest:
+            self._log.warning("REST client not available — skipping exchange sync")
+            return
+
+        try:
+            exchange_positions = await self._rest.get_open_positions()
+        except Exception as exc:
+            self._log.error(f"Failed to fetch open positions from exchange: {exc}")
+            return
+
+        synced = 0
+        for ep in exchange_positions:
+            symbol = ep.get("symbol", "")
+            pos_amt = Decimal(ep.get("positionAmt", "0"))
+            if pos_amt == 0:
+                continue
+            entry_price = Decimal(ep.get("entryPrice", "0"))
+            leverage = int(float(ep.get("leverage", 20)))
+            unrealized_pnl = Decimal(ep.get("unrealizedProfit", "0"))
+            liquidation = ep.get("liquidationPrice")
+            liq = Decimal(liquidation) if liquidation and Decimal(liquidation) != 0 else None
+            mark_price = Decimal(ep.get("markPrice", "0"))
+            side = OrderSide.BUY if pos_amt > 0 else OrderSide.SELL
+
+            # Check if we already track this symbol and skip if so
+            existing = self._positions.get(symbol)
+            if existing and existing.is_open:
+                # Update current price / unrealized PnL from exchange data
+                existing.current_price = mark_price
+                existing.unrealized_pnl = unrealized_pnl
+                existing.liquidation_price = liq
+                self._log.info(
+                    f"  ↻ {symbol}: updated from exchange "
+                    f"(price=${float(mark_price):.2f}, PnL={float(unrealized_pnl):+.2f})"
+                )
+                continue
+
+            # Build a Position from exchange data
+            pos = Position(
+                strategy_name="exchange_sync",
+                symbol=symbol,
+                side=side,
+                status=PositionStatus.OPEN,
+                entry_price=entry_price,
+                current_price=mark_price,
+                liquidation_price=liq,
+                quantity=abs(pos_amt),
+                quote_quantity=abs(pos_amt) * entry_price,
+                leverage=leverage,
+                margin_type="isolated",
+                unrealized_pnl=unrealized_pnl,
+                entry_time=datetime.now(timezone.utc),
+                metadata={
+                    "source": "exchange_sync",
+                    "exchange_data": True,
+                },
+            )
+            self._positions[symbol] = pos
+            synced += 1
+            self._log.info(
+                f"  ↻ Synced existing {symbol}: {float(pos_amt):.4f} @ ${float(entry_price):.2f} "
+                f"x{leverage} (PnL={float(unrealized_pnl):+.2f})"
+            )
+
+        if synced > 0:
+            self._log.info(f"✓ Synced {synced} existing position(s) from Binance exchange")
+        else:
+            self._log.info("No existing positions found on exchange (clean start)")
+
+    # ------------------------------------------------------------------
     # Position Management Loop
     # ------------------------------------------------------------------
 
@@ -990,6 +1076,8 @@ class TradingServer:
         self._app.router.add_get("/status", self._handle_status)
         self._app.router.add_get("/positions", self._handle_positions)
         self._app.router.add_get("/signals", self._handle_signals)
+        self._app.router.add_post("/api/execute", self._handle_execute)
+        self._app.router.add_post("/api/reload-symbols", self._handle_reload_symbols)
 
         # Start
         self._runner = web.AppRunner(self._app)
@@ -1099,6 +1187,306 @@ class TradingServer:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )
+
+    async def _handle_execute(self, request: web.Request) -> web.Response:
+        """POST /api/execute — execute a trade signal from the learning server.
+
+        Body:
+            {
+                "symbol": "SOLUSDT",
+                "side": "BUY" or "SELL",
+                "direction": "LONG" or "SHORT",
+                "confidence": 83,
+                "reason": "Multi-TF confluence: BB lower + RSI 22 + low ADX",
+                "price": 75.08
+            }
+
+        Safety gates:
+            - Circuit breaker check (daily loss limit)
+            - Max open positions check
+            - Max daily trades check
+            - Min balance check ($5 minimum)
+        """
+        if not self._running:
+            return web.json_response({"error": "Server not running"}, status=503)
+
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        symbol = body.get("symbol", "").upper()
+        side_str = body.get("side", "").upper()
+        direction = body.get("direction", "").upper()
+        confidence = body.get("confidence", 0)
+        reason = body.get("reason", "Signal from learning server")
+
+        if not symbol or not side_str or not direction:
+            return web.json_response(
+                {"error": "Missing 'symbol', 'side', and 'direction'"}, status=400
+            )
+
+        if direction not in ("LONG", "SHORT"):
+            return web.json_response({"error": "Direction must be LONG or SHORT"}, status=400)
+
+        if side_str not in ("BUY", "SELL"):
+            return web.json_response({"error": "Side must be BUY or SELL"}, status=400)
+
+        # === Safety gates ===
+
+        # 1. Circuit breaker
+        if self._circuit_breaker:
+            cb_state = await self._circuit_breaker.get_state()
+            if cb_state.get("is_paused"):
+                return web.json_response(
+                    {"error": "Circuit breaker is active — trading paused",
+                     "detail": cb_state.get("reason", "")},
+                    status=403,
+                )
+
+        # 2. Balance check
+        if self._account_balance < Decimal("5"):
+            return web.json_response(
+                {"error": f"Balance too low (${float(self._account_balance):.2f}) — minimum $5 required"},
+                status=403,
+            )
+
+        # 3. Risk check
+        if self._risk_mgr:
+            open_positions = [p for p in self._positions.values() if p.is_open]
+            can_open, msg = self._risk_mgr.can_open_new_position(
+                open_positions, self._daily_trade_count
+            )
+            if not can_open:
+                return web.json_response({"error": msg}, status=403)
+
+        # 4. Check if already in a position for this symbol
+        existing = self._positions.get(symbol)
+        if existing and existing.is_open:
+            return web.json_response(
+                {"error": f"Already have an open position for {symbol}"}, status=409
+            )
+
+        # === Calculate position size ===
+        balance = float(self._account_balance)
+        cfg = load_config()
+        lev = int(cfg.data.get("exchange", {}).get("default_leverage", 20))
+        risk_pct = cfg.risk_per_trade_pct / 100.0  # e.g. 5% → 0.05
+        risk_per_trade = balance * risk_pct
+
+        price = body.get("price", 0)
+        if price <= 0:
+            return web.json_response({"error": "Invalid or missing price"}, status=400)
+
+        # Minimum position value (Binance Futures minimum notional)
+        min_notional = 5.0  # USDT
+        min_quantity = min_notional / price
+
+        # Calculate raw quantity FROM balance risk at 20x
+        raw_qty = (risk_per_trade * lev) / price
+        final_qty = max(raw_qty, min_quantity)
+
+        # Round to step size by querying exchange info
+        try:
+            from binance import AsyncClient
+            client = await self._rest._ensure_client()
+            # Set leverage for this symbol on Binance
+            try:
+                await client.futures_change_leverage(
+                    symbol=symbol,
+                    leverage=lev,
+                )
+                self._log.info(f"Leverage set to {lev}x for {symbol}")
+            except Exception as exc:
+                self._log.warning(f"Leverage change for {symbol}: {exc}")
+
+            info = await client.futures_exchange_info()
+            step_size = 0.001
+            for s in info["symbols"]:
+                if s["symbol"] == symbol:
+                    for f in s["filters"]:
+                        if f["filterType"] == "LOT_SIZE":
+                            step_size = float(f["stepSize"])
+                    break
+
+            # Round DOWN to step size
+            import math
+            step_dec = Decimal(str(step_size))
+            qty_dec = Decimal(str(final_qty))
+            rounded_qty = (qty_dec // step_dec) * step_dec
+            if rounded_qty < Decimal(str(min_quantity)):
+                rounded_qty = (Decimal(str(math.ceil(min_quantity / step_size))) * step_dec)
+            quantity = rounded_qty
+        except Exception:
+            # Fallback: basic rounding
+            quantity = Decimal(str(round(final_qty, 2)))
+            quantity = max(quantity, Decimal("0.01"))
+            quantity = min(quantity, Decimal("1000000"))
+
+        position_value = float(quantity) * price
+
+        # === Place market order ===
+        try:
+            order = await self._rest.place_market_order(
+                symbol=symbol,
+                side=side_str,
+                quantity=quantity,
+            )
+        except Exception as exc:
+            self._log.error(f"Failed to execute {symbol}: {exc}")
+            return web.json_response(
+                {"error": f"Order failed: {exc}"}, status=500
+            )
+
+        entry_price = Decimal(str(order.get("avgPrice", price)))
+
+        # === Place stop-loss order (2% below entry for longs, above for shorts) ===
+        sl_pct = Decimal("0.02")  # 2% stop loss
+        sl_order_id = None
+        try:
+            if side_str == "BUY":
+                stop_price = float(entry_price * (Decimal("1") - sl_pct))
+                sl_side = "SELL"
+            else:
+                stop_price = float(entry_price * (Decimal("1") + sl_pct))
+                sl_side = "BUY"
+
+            # Use binance client directly for STOP_MARKET order
+            sl_params = {
+                "symbol": symbol,
+                "side": sl_side,
+                "quantity": float(quantity),
+                "stopPrice": stop_price,
+                "type": "STOP_MARKET",
+            }
+            client = await self._rest._ensure_client()
+            sl_result = await client.futures_create_order(**sl_params)
+            sl_order_id = str(sl_result.get("orderId", ""))
+            self._log.info(
+                f"🛡️ SL placed for {symbol} at ${stop_price:.2f} "
+                f"(order: {sl_order_id})"
+            )
+        except Exception as exc:
+            self._log.warning(f"Failed to place SL for {symbol}: {exc}")
+
+        # === Place take-profit order (3% above entry for longs, below for shorts) ===
+        tp_pct = Decimal("0.03")  # 3% take profit
+        tp_order_id = None
+        try:
+            if side_str == "BUY":
+                tp_price = float(entry_price * (Decimal("1") + tp_pct))
+                tp_side = "SELL"
+            else:
+                tp_price = float(entry_price * (Decimal("1") - tp_pct))
+                tp_side = "BUY"
+
+            # Use TAKE_PROFIT_LIMIT on Binance Futures
+            tp_params = {
+                "symbol": symbol,
+                "side": tp_side,
+                "quantity": float(quantity),
+                "price": tp_price,
+                "stopPrice": tp_price,
+                "type": "TAKE_PROFIT_MARKET",
+            }
+            client = await self._rest._ensure_client()
+            tp_result = await client.futures_create_order(**tp_params)
+            tp_order_id = str(tp_result.get("orderId", ""))
+            self._log.info(
+                f"🎯 TP placed for {symbol} at ${tp_price:.2f} "
+                f"(order: {tp_order_id})"
+            )
+        except Exception as exc:
+            self._log.warning(f"Failed to place TP for {symbol}: {exc}")
+
+        # === Record position ===
+        from shared.models import OrderSide as OS, PositionStatus as PS
+        pos = Position(
+            strategy_name="auto_signal",
+            symbol=symbol,
+            side=OS.BUY if side_str == "BUY" else OS.SELL,
+            status=PS.OPEN,
+            entry_price=Decimal(str(order.get("avgPrice", price))),
+            quantity=quantity,
+            quote_quantity=Decimal(str(position_value)),
+            leverage=lev,
+            margin_type="isolated",
+            entry_time=datetime.now(timezone.utc),
+            metadata={
+                "confidence": confidence,
+                "reason": reason,
+                "order_id": str(order.get("orderId", "")),
+            },
+        )
+        self._positions[symbol] = pos
+        self._daily_trade_count += 1
+
+        # Log
+        self._log.info(
+            f"🟢 AUTO-EXECUTED {direction} {symbol} "
+            f"@ ${float(pos.entry_price):.2f} x {quantity:.4f} "
+            f"(confidence: {confidence}%, reason: {reason})"
+        )
+
+        return web.json_response({
+            "status": "executed",
+            "symbol": symbol,
+            "side": side_str,
+            "direction": direction,
+            "entry_price": float(pos.entry_price),
+            "quantity": quantity,
+            "position_value_usd": round(position_value, 2),
+            "leverage": lev,
+            "confidence": confidence,
+            "reason": reason,
+            "order_id": str(order.get("orderId", "")),
+            "sl_order_id": sl_order_id or "",
+            "tp_order_id": tp_order_id or "",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+    async def _handle_reload_symbols(self, request: web.Request) -> web.Response:
+        """POST /api/reload-symbols — reload symbol list from config without restart."""
+        try:
+            cfg = load_config()
+            new_symbols = cfg.data.get("trading_server", {}).get("symbols", [])
+
+            if not new_symbols:
+                return web.json_response(
+                    {"error": "No symbols in config"}, status=400
+                )
+
+            old_symbols = self._symbols.copy()
+            self._symbols = new_symbols
+
+            # Reconnect WebSocket with new symbols
+            if self._ws:
+                await self._ws.stop()
+                self._ws = BinanceWebSocket(
+                    symbols=self._symbols,
+                    timeframes=["1m", "5m"],
+                )
+                self._ws.register_callback(self._on_ws_candle)
+                await self._ws.start()
+
+            # Re-register REST polling for new symbols
+            self._last_poll = {}
+
+            self._log.info(
+                f"Symbols reloaded: {old_symbols} → {self._symbols}"
+            )
+
+            return web.json_response({
+                "status": "reloaded",
+                "old_symbols": old_symbols,
+                "new_symbols": self._symbols,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as exc:
+            self._log.error(f"Symbol reload failed: {exc}")
+            return web.json_response(
+                {"error": f"Symbol reload failed: {exc}"}, status=500
+            )
 
 
 # ---------------------------------------------------------------------------

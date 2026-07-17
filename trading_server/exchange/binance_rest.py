@@ -72,6 +72,7 @@ class BinanceRestClient:
             "cancel_order": "futures_cancel_order",
             "get_order": "futures_get_order",
             "get_open_orders": "futures_get_open_orders",
+            "get_position_information": "futures_position_information",
             "get_exchange_info": "futures_exchange_info",
             "get_symbol_ticker": "futures_symbol_ticker",
         }
@@ -463,6 +464,18 @@ class BinanceRestClient:
                 if bal["asset"] == asset.upper():
                     return Decimal(bal.get("free", "0"))
             return Decimal("0")
+
+    async def get_open_positions(self) -> List[Dict[str, Any]]:
+        """Get all open futures positions from Binance."""
+        if not self._use_futures:
+            return []
+        try:
+            positions = await self._request_with_retry("get_position_information")
+            # Filter to positions with actual size (positionAmt != 0)
+            return [p for p in positions if Decimal(p.get("positionAmt", "0")) != 0]
+        except Exception as exc:
+            self._log.warning(f"Failed to fetch open positions: {exc}")
+            return []
 
     async def get_all_balances(self) -> Dict[str, Dict[str, Decimal]]:
         """Get all non-zero balances as a dict keyed by asset.

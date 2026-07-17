@@ -233,6 +233,11 @@ class IntegrationServer:
         self._app.router.add_get("/api/trading/signals", self._handle_proxy_signals)
         self._app.router.add_get("/api/dashboard", self._handle_dashboard)
         self._app.router.add_get("/api/pair-rankings", self._handle_proxy_pair_rankings)
+        self._app.router.add_get("/api/pair-suitability", self._handle_proxy_pair_suitability)
+        self._app.router.add_post("/api/run-suitability", self._handle_proxy_run_suitability)
+        self._app.router.add_get("/api/shadow-analysis", self._handle_proxy_shadow_analysis)
+        self._app.router.add_get("/api/opportunities", self._handle_proxy_opportunities)
+        self._app.router.add_get("/architecture", self._handle_architecture)
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -776,6 +781,33 @@ class IntegrationServer:
     async def _handle_proxy_pair_rankings(self, request: web.Request) -> web.Response:
         """GET /api/pair-rankings → learning server /api/pair-rankings."""
         return await self._proxy_to_learning("/api/pair-rankings", request)
+
+    async def _handle_proxy_pair_suitability(self, request: web.Request) -> web.Response:
+        """GET /api/pair-suitability → learning server /api/pair-suitability."""
+        return await self._proxy_to_learning("/api/pair-suitability", request)
+
+    async def _handle_proxy_run_suitability(self, request: web.Request) -> web.Response:
+        """POST /api/run-suitability → learning server /api/run-suitability."""
+        return await self._proxy_to_learning("/api/run-suitability", request)
+
+    async def _handle_proxy_shadow_analysis(self, request: web.Request) -> web.Response:
+        """GET /api/shadow-analysis → learning server /api/shadow-analysis."""
+        return await self._proxy_to_learning("/api/shadow-analysis", request)
+
+    async def _handle_proxy_opportunities(self, request: web.Request) -> web.Response:
+        """GET /api/opportunities → learning server /api/opportunities."""
+        return await self._proxy_to_learning("/api/opportunities", request)
+
+    async def _handle_architecture(self, request: web.Request) -> web.Response:
+        """GET /architecture — serve the system architecture page."""
+        import os
+        html_path = os.path.join(os.path.dirname(__file__), "architecture.html")
+        try:
+            with open(html_path) as f:
+                html = f.read()
+            return web.Response(text=html, content_type="text/html")
+        except FileNotFoundError:
+            return web.Response(text="<h1>Architecture page not found</h1>", content_type="text/html", status=404)
 
     async def _handle_dashboard(self, request: web.Request) -> web.Response:
         """GET /dashboard — aggregated dashboard view of the entire system.

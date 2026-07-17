@@ -53,8 +53,8 @@ class RiskManager:
             "daily_loss_limit_pct", 5.0
         )
 
-        # Risk per trade (% of account)
-        self._risk_per_trade = 0.01  # 1%
+        # Risk per trade (% of account) — from config
+        self._risk_per_trade = float(risk_global.get("risk_per_trade_pct", 2.0)) / 100.0
 
         # Kelly fraction (quarter Kelly)
         self._kelly_fraction = 0.25

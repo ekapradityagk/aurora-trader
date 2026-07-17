@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aurora Trader — Architecture & Flow</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0e1a;
+    color: #e2e8f0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    padding: 40px 20px;
+    line-height: 1.6;
+  }
+  .container { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 32px; margin-bottom: 6px; background: linear-gradient(135deg, #a78bfa, #6ee7b7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .subtitle { color: #5a6a8a; font-size: 14px; margin-bottom: 40px; }
+  h2 { font-size: 22px; margin: 30px 0 16px; color: #e2e8f0; }
+  h3 { font-size: 16px; margin: 20px 0 10px; color: #94a3b8; }
+
+  /* Server cards */
+  .server-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 20px;
+    margin-bottom: 40px;
+  }
+  .server-card {
+    background: linear-gradient(135deg, #111827, #1e293b);
+    border: 1px solid #1e293b;
+    border-radius: 16px;
+    padding: 24px;
+    position: relative;
+    overflow: hidden;
+  }
+  .server-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 3px;
+  }
+  .server-card.trading::before { background: linear-gradient(90deg, #f59e0b, #f97316); }
+  .server-card.learning::before { background: linear-gradient(90deg, #a78bfa, #8b5cf6); }
+  .server-card.integration::before { background: linear-gradient(90deg, #6ee7b7, #34d399); }
+
+  .server-card .port {
+    font-size: 12px;
+    color: #5a6a8a;
+    background: #0a0e1a;
+    padding: 2px 8px;
+    border-radius: 6px;
+    display: inline-block;
+    margin-left: 8px;
+  }
+  .server-card .role {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+  .server-card.trading .role { color: #f59e0b; }
+  .server-card.learning .role { color: #a78bfa; }
+  .server-card.integration .role { color: #6ee7b7; }
+
+  .server-card h3 { font-size: 18px; margin: 4px 0 12px; color: #e2e8f0; }
+  .server-card ul { list-style: none; padding: 0; }
+  .server-card ul li {
+    padding: 4px 0;
+    font-size: 13px;
+    color: #94a3b8;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .server-card ul li .em { min-width: 20px; }
+
+  /* Flow diagram */
+  .flow-container {
+    background: #111827;
+    border: 1px solid #1e293b;
+    border-radius: 16px;
+    padding: 30px;
+    margin-bottom: 40px;
+    overflow-x: auto;
+  }
+  .flow-diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 13px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    white-space: nowrap;
+  }
+  .flow-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+  .flow-label {
+    width: 100px;
+    text-align: right;
+    padding-right: 12px;
+    font-size: 11px;
+    color: #5a6a8a;
+    flex-shrink: 0;
+  }
+  .flow-box {
+    padding: 6px 14px;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  .flow-box.orange { background: rgba(245,158,11,0.15); color: #f59e0b; border: 1px solid rgba(245,158,11,0.3); }
+  .flow-box.purple { background: rgba(167,139,250,0.15); color: #a78bfa; border: 1px solid rgba(167,139,250,0.3); }
+  .flow-box.green { background: rgba(110,231,183,0.15); color: #6ee7b7; border: 1px solid rgba(110,231,183,0.3); }
+  .flow-box.blue { background: rgba(96,165,250,0.15); color: #60a5fa; border: 1px solid rgba(96,165,250,0.3); }
+  .flow-box.red { background: rgba(252,165,165,0.15); color: #fca5a5; border: 1px solid rgba(252,165,165,0.3); }
+  .flow-box.small { font-size: 10px; padding: 4px 10px; }
+  .flow-arrow { color: #5a6a8a; padding: 0 8px; font-size: 16px; flex-shrink: 0; }
+  .flow-sub { font-size: 11px; color: #5a6a8a; margin-left: 100px; padding-left: 12px; }
+
+  /* Timeline */
+  .timeline { position: relative; padding-left: 30px; margin-bottom: 40px; }
+  .timeline::before {
+    content: '';
+    position: absolute;
+    left: 10px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(180deg, #a78bfa, #6ee7b7, #f59e0b);
+  }
+  .timeline-item {
+    position: relative;
+    margin-bottom: 24px;
+    padding: 16px 20px;
+    background: #111827;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
+  }
+  .timeline-item::before {
+    content: '';
+    position: absolute;
+    left: -26px;
+    top: 20px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #a78bfa;
+    border: 2px solid #0a0e1a;
+  }
+  .timeline-item .time { font-size: 12px; color: #5a6a8a; margin-bottom: 4px; }
+  .timeline-item .title { font-size: 16px; font-weight: 600; color: #e2e8f0; margin-bottom: 6px; }
+  .timeline-item .desc { font-size: 13px; color: #94a3b8; }
+
+  /* Table */
+  table { width: 100%; border-collapse: collapse; margin: 16px 0 30px; font-size: 13px; }
+  th { text-align: left; padding: 10px 12px; background: #111827; color: #94a3b8; font-weight: 600; border-bottom: 2px solid #1e293b; }
+  td { padding: 10px 12px; border-bottom: 1px solid #1e293b; color: #cbd5e1; }
+  td:first-child { font-weight: 600; color: #e2e8f0; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+  .tag.green { background: rgba(110,231,183,0.15); color: #6ee7b7; }
+  .tag.purple { background: rgba(167,139,250,0.15); color: #a78bfa; }
+  .tag.orange { background: rgba(245,158,11,0.15); color: #f59e0b; }
+  .tag.blue { background: rgba(96,165,250,0.15); color: #60a5fa; }
+  .tag.red { background: rgba(252,165,165,0.15); color: #fca5a5; }
+
+  .info-box {
+    background: rgba(167,139,250,0.08);
+    border: 1px solid rgba(167,139,250,0.2);
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin-bottom: 20px;
+    font-size: 13px;
+    color: #cbd5e1;
+  }
+  .info-box strong { color: #a78bfa; }
+
+  .footer { text-align: center; color: #5a6a8a; font-size: 12px; margin-top: 40px; padding-top: 20px; border-top: 1px solid #1e293b; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <h1>🌌 Aurora Trader — System Architecture</h1>
+  <div class="subtitle">Auto-trading pipeline · 3 server stack · Binance Futures execution</div>
+
+  <!-- ======== 3 SERVERS ======== -->
+  <h2>🏗️ The Three Servers</h2>
+  <div class="server-grid">
+    <div class="server-card trading">
+      <div class="role">⚡ EXECUTOR</div>
+      <h3>Trading Server <span class="port">:8900</span></h3>
+      <ul>
+        <li><span class="em">📡</span> WebSocket feeds (1m / 5m real-time)</li>
+        <li><span class="em">📊</span> REST polling (15m / 1h / 4h / 1d on close)</li>
+        <li><span class="em">🧠</span> Strategy analysis on 1h candle close</li>
+        <li><span class="em">💰</span> Binance Futures execution</li>
+        <li><span class="em">🛡️</span> Risk Manager + Circuit Breaker</li>
+        <li><span class="em">📋</span> Position lifecycle (entry → trailing → exit)</li>
+        <li><span class="em">🔌</span> <code>POST /api/execute</code> — auto-trade entry point</li>
+        <li><span class="em">🔄</span> <code>POST /api/reload-symbols</code> — hot reload pairs</li>
+      </ul>
+    </div>
+
+    <div class="server-card learning">
+      <div class="role">🧠 BRAIN</div>
+      <h3>Learning Server <span class="port">:8901</span></h3>
+      <ul>
+        <li><span class="em">📈</span> Regime Detection (TREND / RANGE / VOLATILE)</li>
+        <li><span class="em">🎯</span> Strategy Selection (mean reversion / trend follow)</li>
+        <li><span class="em">🔬</span> Pair Suitability Scorer (29 pairs → top 6)</li>
+        <li><span class="em">🔥</span> <strong>Opportunity Spotter</strong> (15m / 1h / 4h confluence)</li>
+        <li><span class="em">🤖</span> <strong>Signal Executor</strong> (auto-sends to trading server)</li>
+        <li><span class="em">👤</span> Shadow Analyzer (post-trade behavior + biases)</li>
+        <li><span class="em">🏆</span> Pair Rankings (win rate / Sharpe / profit factor)</li>
+        <li><span class="em">🧪</span> Hyperopt (weekly parameter optimization)</li>
+        <li><span class="em">🔄</span> <strong>Auto-Rotation</strong> (weekly pair swap + hot reload)</li>
+      </ul>
+    </div>
+
+    <div class="server-card integration">
+      <div class="role">📊 COORDINATOR</div>
+      <h3>Integration Server <span class="port">:8903</span></h3>
+      <ul>
+        <li><span class="em">🖥️</span> Real-time HTML Dashboard</li>
+        <li><span class="em">🔁</span> Proxy routes (trading + learning APIs)</li>
+        <li><span class="em">📦</span> Version Control (strategy versioning)</li>
+        <li><span class="em">📊</span> Winrate Database + tracking</li>
+        <li><span class="em">⏪</span> Rollback Manager (auto/manual)</li>
+        <li><span class="em">🔗</span> Coordinator (aggregates all system status)</li>
+        <li><span class="em">📋</span> Recent Activity (Binance trade history)</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ======== AUTO-TRADE FLOW ======== -->
+  <h2>⚡ Auto-Trade Pipeline</h2>
+  <div class="info-box">
+    <strong>🔒 Risk Gates</strong> — Every trade passes through: Circuit Breaker (daily loss limit) → Min Balance ($5) → Max Positions (5) → Max Daily Trades (50) → Duplicate Symbol Check → Position Sizing (2% risk × 5x leverage)
+  </div>
+
+  <div class="flow-container">
+    <div class="flow-diagram">
+
+      <!-- Row 1: Weekly Scan -->
+      <div class="flow-row">
+        <span class="flow-label">Weekly Mon 12:00</span>
+        <span class="flow-box purple">Pair Suitability</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box blue small">Fetch 7d OHLCV 29 pairs</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box blue small">Score: ATR% · ADX · Volume · Funding · Smoothness</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box orange">Top 6 Pairs</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box green">Write config.yaml</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box green">POST /api/reload-symbols</span>
+      </div>
+
+      <!-- Row 2: Every 30m -->
+      <div class="flow-row">
+        <span class="flow-label">Every 30 min</span>
+        <span class="flow-box purple">Opportunity Spotter</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box blue small">Fetch 15m · 1h · 4h OHLCV</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box blue small">Compute RSI · BB · EMA · ADX</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box purple">Multi-TF Confluence</span>
+      </div>
+
+      <!-- Row 3: Signal Found -->
+      <div class="flow-row">
+        <span class="flow-label">Signal ≥ 70%</span>
+        <span class="flow-box purple">Signal Executor</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box red">🔒 Risk Gates</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box orange">POST /api/execute</span>
+      </div>
+
+      <!-- Row 4: Trading Server -->
+      <div class="flow-row">
+        <span class="flow-label">Trading Server</span>
+        <span class="flow-box orange">place_market_order</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box blue small">Binance Futures</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box green">Position Open ✅</span>
+      </div>
+
+      <!-- Row 5: Monitoring -->
+      <div class="flow-row">
+        <span class="flow-label">While Open</span>
+        <span class="flow-box orange">WebSocket Stream</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box blue small">Trailing Stop · Break-even · ATR Stop</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box purple">Circuit Breaker</span>
+      </div>
+
+      <!-- Row 6: Close -->
+      <div class="flow-row">
+        <span class="flow-label">Trade Closes</span>
+        <span class="flow-box green">Record to trade_results</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box purple">Shadow Analyzer</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box purple">Bias Detection</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box purple">Recommendations</span>
+      </div>
+
+      <!-- Row 7: Dashboard -->
+      <div class="flow-row">
+        <span class="flow-label">Dashboard</span>
+        <span class="flow-box green">Integration Server :8903</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box blue small">Status · Balance · Positions · Signals</span>
+        <span class="flow-arrow">→</span>
+        <span class="flow-box blue small">🔥 HOT NOW · 🔬 Suitability · 👤 Shadow</span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ======== TIMELINE ======== -->
+  <h2>⏱️ Trade Lifecycle Timeline</h2>
+  <div class="timeline">
+    <div class="timeline-item">
+      <div class="time">⏰ Every 30 minutes</div>
+      <div class="title">🧠 Learning Server scans for opportunities</div>
+      <div class="desc">Fetches 15m / 1h / 4h candles for all active pairs. Computes RSI, Bollinger Bands, EMA, ADX. Looks for confluence: BB touch + RSI extreme + trend alignment across timeframes.</div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="time">🎯 Signal ≥ 70% confidence</div>
+      <div class="title">🤖 Signal Executor checks risk gates</div>
+      <div class="desc">Circuit breaker active? Balance > $5? Max positions reached? Already in this pair? If all clear, calculates position size (2% of $balance × 5x leverage) and sends to trading server.</div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="time">⚡ POST /api/execute</div>
+      <div class="title">💹 Trading Server places market order</div>
+      <div class="desc">Sends MARKET order to Binance Futures. Records position with entry price, quantity, confidence, and reason. Increments daily trade counter.</div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="time">📡 While position is open</div>
+      <div class="title">🛡️ Risk Manager monitors position</div>
+      <div class="desc">WebSocket streams real-time price updates. ATR-based stop loss, break-even after 1:1 reward, trailing stop on winners. Circuit breaker tracks daily PnL.</div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="time">🔚 Position closes</div>
+      <div class="title">📊 Learning Server analyzes result</div>
+      <div class="desc">Trade result written to <code>trade_results</code> table. Shadow Analyzer profiles holding time, entry/exit timing, detects behavioral biases (disposition effect, overtrading, chase entries, anchoring).</div>
+    </div>
+
+    <div class="timeline-item">
+      <div class="time">🔄 Weekly (Monday 12:00)</div>
+      <div class="title">🔬 Pair Universe rotated</div>
+      <div class="desc">Suitability Scorer re-evaluates all 29 pairs on movement quality. Bottom performers replaced. Config auto-updated and trading server hot-reloaded.</div>
+    </div>
+  </div>
+
+  <!-- ======== DATA FLOW TABLE ======== -->
+  <h2>📊 Data Flow Between Servers</h2>
+  <table>
+    <thead>
+      <tr><th>From</th><th>To</th><th>Data</th><th>When</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>🌐 Binance API</td>
+        <td><span class="tag purple">Learning Server</span></td>
+        <td>OHLCV candles · Funding rates</td>
+        <td>On scan / suitability run</td>
+      </tr>
+      <tr>
+        <td>🌐 Binance WS</td>
+        <td><span class="tag orange">Trading Server</span></td>
+        <td>Real-time 1m / 5m price</td>
+        <td>Continuous</td>
+      </tr>
+      <tr>
+        <td><span class="tag purple">Learning Server</span></td>
+        <td><span class="tag orange">Trading Server</span></td>
+        <td><code>POST /api/execute</code> — trade signals</td>
+        <td>Every 30 min (if signal ≥ 70%)</td>
+      </tr>
+      <tr>
+        <td><span class="tag purple">Learning Server</span></td>
+        <td><span class="tag orange">Trading Server</span></td>
+        <td><code>POST /api/reload-symbols</code> — pair rotation</td>
+        <td>Weekly Monday 12:00</td>
+      </tr>
+      <tr>
+        <td><span class="tag orange">Trading Server</span></td>
+        <td>🌐 Binance API</td>
+        <td>Market orders · Position management</td>
+        <td>On signal execution</td>
+      </tr>
+      <tr>
+        <td><span class="tag orange">Trading Server</span></td>
+        <td><span class="tag green">Integration Server</span></td>
+        <td>Status · Positions · Analysis · Signals</td>
+        <td>On dashboard refresh</td>
+      </tr>
+      <tr>
+        <td><span class="tag purple">Learning Server</span></td>
+        <td><span class="tag green">Integration Server</span></td>
+        <td>Suitability · Rankings · Shadow Analysis · Opportunities</td>
+        <td>Via proxy on dashboard load</td>
+      </tr>
+      <tr>
+        <td><span class="tag orange">Trading Server</span></td>
+        <td>data/integration.db</td>
+        <td>Trade results (closed positions)</td>
+        <td>On trade close</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ======== NEW MODULES ======== -->
+  <h2>🧩 New Modules (Built Today)</h2>
+  <table>
+    <thead>
+      <tr><th>Module</th><th>File</th><th>Phase</th><th>Purpose</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="tag blue">Suitability Scorer</span></td>
+        <td><code>learning_server/suitability_scorer.py</code></td>
+        <td><span class="tag purple">Phase 1</span></td>
+        <td>Scores 29 pairs on movement quality (ATR%, ADX, volume, funding rate, smoothness)</td>
+      </tr>
+      <tr>
+        <td><span class="tag blue">Shadow Analyzer</span></td>
+        <td><code>learning_server/shadow_analyzer.py</code></td>
+        <td><span class="tag purple">Phase 2</span></td>
+        <td>Post-trade behavior profiling + bias detection (disposition, overtrading, chase, anchoring)</td>
+      </tr>
+      <tr>
+        <td><span class="tag blue">Opportunity Spotter</span></td>
+        <td><code>learning_server/opportunity_spotter.py</code></td>
+        <td><span class="tag purple">Phase 3</span></td>
+        <td>Multi-TF confluence detection (15m/1h/4h) with confidence scoring</td>
+      </tr>
+      <tr>
+        <td><span class="tag orange">Execute Endpoint</span></td>
+        <td><code>trading_server/server.py</code></td>
+        <td><span class="tag purple">Auto Bridge</span></td>
+        <td><code>POST /api/execute</code> — opens positions with risk gates</td>
+      </tr>
+      <tr>
+        <td><span class="tag orange">Reload Endpoint</span></td>
+        <td><code>trading_server/server.py</code></td>
+        <td><span class="tag purple">Auto Bridge</span></td>
+        <td><code>POST /api/reload-symbols</code> — hot-swaps pairs without restart</td>
+      </tr>
+      <tr>
+        <td><span class="tag purple">Signal Executor</span></td>
+        <td><code>learning_server/server.py</code></td>
+        <td><span class="tag purple">Auto Bridge</span></td>
+        <td>Background loop: scans → checks risk → sends to trading server</td>
+      </tr>
+      <tr>
+        <td><span class="tag green">Dashboard Cards</span></td>
+        <td><code>integration/dashboard.html</code></td>
+        <td><span class="tag purple">All</span></td>
+        <td>🔥 HOT NOW · 🔬 Pair Suitability · 👤 Shadow Analysis</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ======== CRON JOBS ======== -->
+  <h2>⏰ Scheduled Tasks</h2>
+  <table>
+    <thead>
+      <tr><th>Job</th><th>Schedule</th><th>Action</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="tag purple">Weekly Pair Rotation</span></td>
+        <td>Monday 12:00</td>
+        <td>Score 29 pairs → pick top 6 → update config → hot-reload trading server</td>
+      </tr>
+      <tr>
+        <td><span class="tag purple">Opportunity Scanner</span></td>
+        <td>Every hour</td>
+        <td>Scan pairs → send alert with best signals to Discord</td>
+      </tr>
+      <tr>
+        <td><span class="tag purple">Signal Executor</span></td>
+        <td>Every 30 min</td>
+        <td>Scan → find signal ≥ 70% → check risk → auto-execute on Binance</td>
+      </tr>
+      <tr>
+        <td><span class="tag orange">Hyperopt</span></td>
+        <td>Weekly</td>
+        <td>Optimize strategy parameters via Optuna</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- ======== RISK MANAGEMENT ======== -->
+  <h2>🛡️ Risk Management Gates</h2>
+  <table>
+    <thead>
+      <tr><th>Gate</th><th>Limit</th><th>What happens when hit</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Circuit Breaker</td><td>5% daily loss</td><td>All trading paused until next day</td></tr>
+      <tr><td>Min Balance</td><td>$5 USDT</td><td>Orders rejected, <code>403 Forbidden</code></td></tr>
+      <tr><td>Max Open Positions</td><td>5</td><td>No new positions until one closes</td></tr>
+      <tr><td>Max Daily Trades</td><td>50</td><td>No more trades for the day</td></tr>
+      <tr><td>Duplicate Symbol</td><td>1 per pair</td><td>Can't open second position on same pair</td></tr>
+      <tr><td>Position Sizing</td><td>2% risk × 5x leverage</td><td>$44 balance → $0.88 risk → $4.40 position value</td></tr>
+    </tbody>
+  </table>
+
+  <div class="footer">
+    Aurora Trader v1.0 · Built with 💜 for shyduck · Hermes Agent
+  </div>
+
+</div>
+</body>
+</html>

@@ -30,6 +30,9 @@ from learning_server.regime import RegimeDetector, RegimeResult
 from learning_server.analyzer import TradeAnalyzer, AnalysisReport
 from learning_server.strategy_selector import StrategySelector, SelectionRecord
 from learning_server.pair_ranker import PairRanker
+from learning_server.suitability_scorer import SuitabilityScorer, SuitabilityReport
+from learning_server.shadow_analyzer import ShadowAnalyzer, ShadowReport
+from learning_server.opportunity_spotter import OpportunitySpotter, ScanResult
 
 logger = get_logger("learning_server.server")
 
@@ -124,6 +127,9 @@ class LearningServer:
         self._analyzer = TradeAnalyzer()
         self._selector = StrategySelector()
         self._pair_ranker = PairRanker()
+        self._suitability_scorer = SuitabilityScorer()
+        self._shadow_analyzer = ShadowAnalyzer()
+        self._opportunity_spotter = OpportunitySpotter()
 
         # HTTP server state
         self._app: Optional[web.Application] = None
@@ -137,6 +143,7 @@ class LearningServer:
         self._last_optimization: Optional[OptimizationResult] = None
         self._last_analysis: Optional[AnalysisReport] = None
         self._last_regime: Optional[RegimeResult] = None
+        self._last_suitability: Optional[Dict[str, Any]] = None
 
         # Scheduled hyperopt interval
         self._hyperopt_interval_hours = ls_cfg.get(
@@ -172,6 +179,9 @@ class LearningServer:
             self._running = True
             self._tasks.add(
                 asyncio.create_task(self._hyperopt_scheduler_loop())
+            )
+            self._tasks.add(
+                asyncio.create_task(self._signal_executor_loop())
             )
             self._log.info(
                 f"Hyperopt scheduler started "
@@ -240,6 +250,10 @@ class LearningServer:
         self._app.router.add_post("/strategy/select", self._handle_strategy_select)
         self._app.router.add_get("/selections", self._handle_selections)
         self._app.router.add_get("/api/pair-rankings", self._handle_pair_rankings)
+        self._app.router.add_get("/api/pair-suitability", self._handle_pair_suitability)
+        self._app.router.add_post("/api/run-suitability", self._handle_run_suitability)
+        self._app.router.add_get("/api/shadow-analysis", self._handle_shadow_analysis)
+        self._app.router.add_get("/api/opportunities", self._handle_opportunities)
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -578,9 +592,306 @@ class LearningServer:
                 status=500,
             )
 
+    async def _handle_pair_suitability(self, request: web.Request) -> web.Response:
+        """GET /api/pair-suitability — get cached pair suitability scores.
+
+        Returns the last scored report, or an empty result if never run.
+        """
+        if self._last_suitability:
+            return web.json_response(self._last_suitability)
+        return web.json_response({
+            "pairs": [],
+            "top_picks": [],
+            "scan_timestamp": "",
+            "total_scored": 0,
+            "message": "No suitability scan has been run yet. POST /api/run-suitability to trigger.",
+        })
+
+    async def _handle_run_suitability(self, request: web.Request) -> web.Response:
+        """POST /api/run-suitability — trigger a suitability scan now."""
+        try:
+            report = await self._suitability_scorer.score_universe()
+
+            self._last_suitability = self._suitability_to_dict(report)
+
+            # Auto-rotate if we have top picks
+            if report.top_picks:
+                await self._apply_rotation(report.top_picks)
+
+            return web.json_response(self._last_suitability)
+        except Exception as exc:
+            self._log.error(f"Suitability scan failed: {exc}", exc_info=True)
+            return web.json_response(
+                {"error": "Suitability scan failed", "detail": str(exc)},
+                status=500,
+            )
+
+    def _suitability_to_dict(self, report: SuitabilityReport) -> Dict[str, Any]:
+        """Convert a SuitabilityReport to a JSON-friendly dict."""
+        return {
+            "total_scored": report.total_scored,
+            "scan_timestamp": report.scan_timestamp,
+            "top_picks": report.top_picks,
+            "errors": report.errors,
+            "pairs": [
+                {
+                    "symbol": p.symbol,
+                    "composite_score": p.composite_score,
+                    "movement_score": p.movement_score,
+                    "trend_score": p.trend_score,
+                    "volume_score": p.volume_score,
+                    "funding_score": p.funding_score,
+                    "smoothness_score": p.smoothness_score,
+                    "atr_pct": p.atr_pct,
+                    "adx": p.adx,
+                    "volume_cv": p.volume_cv,
+                    "funding_rate_annualised": p.funding_rate_annualised,
+                    "avg_body_ratio": p.avg_body_ratio,
+                    "avg_volume_usdt": p.avg_volume_usdt,
+                    "close_price": p.close_price,
+                    "regime_label": p.regime_label,
+                }
+                for p in report.pairs
+            ],
+        }
+
+    async def _apply_rotation(self, top_picks: List[str]) -> None:
+        """Update the trading server's active symbol list with top picks."""
+        if not top_picks:
+            return
+
+        # Update config.yaml trading_server.symbols
+        import yaml
+
+        cfg_path = Path("config.yaml")
+        if not cfg_path.is_file():
+            self._log.warning("config.yaml not found — skipping rotation")
+            return
+
+        try:
+            with open(cfg_path) as f:
+                cfg = yaml.safe_load(f)
+
+            # Update symbols
+            cfg.setdefault("trading_server", {})["symbols"] = top_picks
+
+            with open(cfg_path, "w") as f:
+                yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+
+            self._log.info(
+                f"Auto-rotation applied — active symbols: {', '.join(top_picks)}"
+            )
+
+            # Hot-reload the trading server without restart
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as session:
+                    async with session.post(
+                        "http://127.0.0.1:8900/api/reload-symbols"
+                    ) as resp:
+                        if resp.status == 200:
+                            self._log.info("Trading server symbols reloaded ✅")
+                        else:
+                            self._log.warning(
+                                f"Trading server reload returned HTTP {resp.status}"
+                            )
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                self._log.warning(f"Trading server reload failed: {exc}")
+        except Exception as exc:
+            self._log.error(f"Failed to write config.yaml for rotation: {exc}")
+
+    async def _handle_opportunities(self, request: web.Request) -> web.Response:
+        """GET /api/opportunities — scan for trading opportunities now."""
+        try:
+            symbols = self._cfg.data.get("trading_server", {}).get("symbols", [])
+            result = await self._opportunity_spotter.scan(symbols=symbols)
+
+            return web.json_response({
+                "timestamp": result.timestamp,
+                "total_scanned": result.total_scanned,
+                "hot_list": result.hot_list,
+                "watch_list": result.watch_list,
+                "opportunities": [
+                    {
+                        "symbol": o.symbol,
+                        "direction": o.direction,
+                        "confidence": o.confidence,
+                        "primary_timeframe": o.primary_timeframe,
+                        "entry_notes": o.entry_notes,
+                        "price": o.price,
+                        "brewing": o.brewing,
+                        "timeframes": {
+                            tf: {
+                                "direction": s.direction,
+                                "confidence": s.confidence,
+                                "rsi": s.rsi,
+                                "bb_position": s.bb_position,
+                                "ema_position": s.ema_position,
+                                "adx": s.adx,
+                                "reasons": s.reasons,
+                            }
+                            for tf, s in o.timeframes.items()
+                        },
+                    }
+                    for o in result.opportunities
+                ],
+                "errors": result.errors[:5],
+            })
+        except Exception as exc:
+            self._log.error(f"Opportunity scan failed: {exc}", exc_info=True)
+            return web.json_response(
+                {"error": "Opportunity scan failed", "detail": str(exc)},
+                status=500,
+            )
+
+    async def _handle_shadow_analysis(self, request: web.Request) -> web.Response:
+        """GET /api/shadow-analysis — run shadow analysis on recent trades.
+
+        Query params:
+            window_days (int, default 30): look-back window
+            min_trades (int, default 3): minimum trades per strategy
+        """
+        window_days = int(request.query.get("window_days", "30"))
+        min_trades = int(request.query.get("min_trades", "3"))
+
+        try:
+            report = await self._shadow_analyzer.analyze(
+                window_days=window_days,
+                min_trades=min_trades,
+            )
+
+            return web.json_response({
+                "timestamp": report.timestamp,
+                "total_trades_analyzed": report.total_trades_analyzed,
+                "time_period_days": report.time_period_days,
+                "strategies": {
+                    name: {
+                        "total_trades": p.total_trades,
+                        "wins": p.wins,
+                        "losses": p.losses,
+                        "win_rate": p.win_rate,
+                        "total_pnl": p.total_pnl,
+                        "avg_pnl": p.avg_pnl,
+                        "profit_factor": p.profit_factor,
+                        "avg_rrr": p.avg_rrr,
+                        "sharpe": p.sharpe,
+                        "max_drawdown": p.max_drawdown,
+                        "avg_holding_hours": p.avg_holding_hours,
+                        "win_avg_holding_hours": p.win_avg_holding_hours,
+                        "loss_avg_holding_hours": p.loss_avg_holding_hours,
+                        "entry_reasons": p.entry_reasons,
+                    }
+                    for name, p in report.strategy_profiles.items()
+                },
+                "biases": {
+                    "overall_health": report.bias_report.overall_health,
+                    "disposition_effect": report.bias_report.disposition_effect,
+                    "overtrading": report.bias_report.overtrading,
+                    "chase_entries": report.bias_report.chase_entries,
+                    "anchoring": report.bias_report.anchoring,
+                },
+                "entry_timing": report.entry_timing_analysis,
+                "exit_timing": report.exit_timing_analysis,
+                "top_performers": report.top_performers,
+                "worst_performers": report.worst_performers,
+                "recommendations": report.recommendations,
+            })
+        except Exception as exc:
+            self._log.error(f"Shadow analysis failed: {exc}", exc_info=True)
+            return web.json_response(
+                {"error": "Shadow analysis failed", "detail": str(exc)},
+                status=500,
+            )
+
     # ------------------------------------------------------------------
     # Background scheduler
     # ------------------------------------------------------------------
+
+    async def _signal_executor_loop(self) -> None:
+        """Background loop: scan for high-confidence signals and auto-execute.
+
+        Runs every 30 minutes. Scans active pairs, checks for signals
+        with confidence >= 70% (not brewing), and forwards to the
+        trading server for execution.
+        """
+        EXECUTOR_INTERVAL = 1800  # 30 minutes
+        TRADING_EXECUTE_URL = "http://127.0.0.1:8900/api/execute"
+        MIN_CONFIDENCE = 70
+
+        await asyncio.sleep(60)  # Initial delay — let everything start up
+
+        while self._running:
+            try:
+                symbols = self._cfg.data.get("trading_server", {}).get("symbols", [])
+                if not symbols:
+                    await asyncio.sleep(EXECUTOR_INTERVAL)
+                    continue
+
+                result = await self._opportunity_spotter.scan(symbols=symbols)
+
+                # Find the best non-brewing signal
+                best = None
+                for opp in result.opportunities:
+                    if (
+                        not opp.brewing
+                        and opp.confidence >= MIN_CONFIDENCE
+                        and opp.direction in ("LONG", "SHORT")
+                    ):
+                        if best is None or opp.confidence > best.confidence:
+                            best = opp
+
+                if best is not None:
+                    side = "BUY" if best.direction == "LONG" else "SELL"
+                    payload = {
+                        "symbol": best.symbol,
+                        "side": side,
+                        "direction": best.direction,
+                        "confidence": best.confidence,
+                        "reason": best.entry_notes,
+                        "price": best.price,
+                    }
+
+                    async with aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=15)
+                    ) as session:
+                        try:
+                            async with session.post(
+                                TRADING_EXECUTE_URL, json=payload
+                            ) as resp:
+                                if resp.status == 200:
+                                    data = await resp.json()
+                                    self._log.info(
+                                        f"🟢 AUTO-EXECUTED {best.direction} {best.symbol} "
+                                        f"({best.confidence}%) → order {data.get('order_id', '?')}"
+                                    )
+                                else:
+                                    err = await resp.text()
+                                    self._log.warning(
+                                        f"⚠️ Execute rejected for {best.symbol}: "
+                                        f"HTTP {resp.status} — {err[:200]}"
+                                    )
+                        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                            self._log.warning(
+                                f"⚠️ Execute failed for {best.symbol}: {exc}"
+                            )
+                else:
+                    self._log.debug(
+                        "Signal executor: no high-confidence signals found"
+                    )
+
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                self._log.error(
+                    f"Signal executor error: {exc}", exc_info=True
+                )
+
+            # Wait for next cycle (check every 30s if stopped)
+            for _ in range(EXECUTOR_INTERVAL // 30):
+                if not self._running:
+                    break
+                await asyncio.sleep(30)
 
     async def _hyperopt_scheduler_loop(self) -> None:
         """Background loop that runs hyperopt on a weekly schedule."""

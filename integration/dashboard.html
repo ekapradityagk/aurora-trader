@@ -162,6 +162,16 @@
       </div>
     </div>
 
+    <div class="section" id="hotNowSection" style="display:none;border:2px solid #f59e0b;background:rgba(245,158,11,0.05);">
+      <h2>🔥 HOT NOW <span id="hotTime" style="font-size:12px;color:#5a6a8a;font-weight:400;"></span></h2>
+      <div id="hotNowContainer"></div>
+    </div>
+
+    <div class="section" id="positionsSection">
+      <h2>🎯 Open Positions</h2>
+      <div id="positionsBody"><span style="color:#5a6a8a;">No open positions</span></div>
+    </div>
+
     <div class="section" id="versionSection">
       <h2>📦 Strategy Versions</h2>
       <div id="versionList"><span style="color:#5a6a8a;">No versions deployed yet</span></div>
@@ -177,9 +187,20 @@
       <div id="rankingsContainer"></div>
     </div>
 
-    <div class="section" id="positionsSection">
-      <h2>🎯 Open Positions</h2>
-      <div id="positionsBody"><span style="color:#5a6a8a;">No open positions</span></div>
+    <div class="section" id="suitabilitySection" style="display:none;">
+      <h2>🔬 Pair Suitability <span id="suitabilityTime" style="font-size:12px;color:#5a6a8a;font-weight:400;"></span></h2>
+      <div id="suitabilityContainer"></div>
+      <div style="margin-top:8px;">
+        <button class="refresh-btn" onclick="runSuitabilityScan()" style="font-size:12px;padding:6px 14px;">🔬 Run Scan Now</button>
+      </div>
+    </div>
+
+    <div class="section" id="shadowSection" style="display:none;">
+      <h2>👤 Shadow Analysis <span id="shadowTime" style="font-size:12px;color:#5a6a8a;font-weight:400;"></span></h2>
+      <div id="shadowContainer"></div>
+      <div style="margin-top:8px;">
+        <button class="refresh-btn" onclick="refreshShadowAnalysis()" style="font-size:12px;padding:6px 14px;">👤 Refresh Analysis</button>
+      </div>
     </div>
 
     <div class="section" id="tradesSection">
@@ -198,6 +219,7 @@
       <h2>🔗 Quick Links</h2>
       <div class="nav-links">
         <a href="/api/dashboard" target="_blank">📡 API (JSON)</a>
+        <a href="/architecture" target="_blank">🏗️ Architecture</a>
         <a href="/status" target="_blank">📊 System Status</a>
         <a href="/versions" target="_blank">📦 Versions</a>
         <a href="/trades" target="_blank">📋 Trade History</a>
@@ -291,8 +313,11 @@
         }
 
         updateDashboard();
-        // Fire-and-forget: fetch pair rankings (won't block dashboard)
+        // Fire-and-forget: fetch pair rankings + suitability + shadow (won't block dashboard)
         fetchPairRankings();
+        fetchPairSuitability();
+        fetchShadowAnalysis();
+        fetchOpportunities();
       } catch (err) {
         if (isFirstLoad) {
           isFirstLoad = false;
@@ -484,34 +509,85 @@
         document.getElementById('analysisTime').textContent = latestScan ? '· Last scan: ' + fmtTime(latestScan) : '';
       }
 
-      // Open Positions — in-place
+      // Open Positions — 3-per-row grid cards with PnL-based coloring + ROI %
       const positions = (DATA.positionsData && DATA.positionsData.positions) || [];
       const pb = document.getElementById('positionsBody');
-      if (positions.length === 0) {
-        pb.innerHTML = '<span style="color:#5a6a8a;">No open positions</span>';
-      } else {
-        pb.innerHTML = `<div style="overflow-x:auto;"><table>
-          <thead><tr><th>Pair</th><th>Side</th><th>Entry</th><th>Size</th><th>PnL</th><th>Stop Loss</th><th>Take Profit</th><th>Status</th></tr></thead>
-          <tbody>${positions.map(p => {
-            const side = (p.side || '').toUpperCase();
-            const sideColor = side === 'BUY' || side === 'LONG' ? '#6ee7b7' : '#fca5a5';
-            const upnl = p.unrealized_pnl || 0;
-            const trailing = p.metadata?.trailing_active;
-            const slStr = p.stop_loss ? '$' + Number(p.stop_loss).toFixed(2) : '—';
-            const tpStr = p.take_profit ? '$' + Number(p.take_profit).toFixed(2) : '—';
-            return `<tr>
-              <td style="font-weight:600;">${p.symbol || '—'}</td>
-              <td><span class="badge ${side === 'BUY' || side === 'LONG' ? 'green' : 'red'}" style="font-size:10px;">${side}</span></td>
-              <td>${p.entry_price ? '$' + Number(p.entry_price).toFixed(2) : '—'}</td>
-              <td>${p.quantity ? Number(p.quantity).toFixed(4) : '—'}</td>
-              <td style="color:${upnl >= 0 ? '#6ee7b7' : '#fca5a5'};font-weight:600;">${upnl >= 0 ? '+' : ''}${Number(upnl).toFixed(2)}</td>
-              <td style="color:#fca5a5;">${slStr}</td>
-              <td style="color:#6ee7b7;">${tpStr}</td>
-              <td>${trailing ? '<span class="badge blue">Trailing</span>' : '<span class="badge yellow">Active</span>'}</td>
-            </tr>`;
-          }).join('')}</tbody>
-        </table></div>`;
+      const openPositions = positions.filter(p => p.status === 'open');
+      // Sort by ROI descending (highest performer first)
+      function calcRoi(p) {
+        if (!p.entry_price || !p.current_price || Number(p.entry_price) <= 0) return 0;
+        const side = (p.side || '').toUpperCase();
+        const entry = Number(p.entry_price);
+        const curr = Number(p.current_price);
+        const rawChange = (curr - entry) / entry;
+        const dirChange = side === 'BUY' ? rawChange : -rawChange;
+        return dirChange * (p.leverage || 1) * 100;
       }
+      openPositions.sort((a, b) => calcRoi(b) - calcRoi(a));
+      // Always show 6 slots (2 rows × 3 cols), fill empty slots with null
+      const maxSlots = 6;
+      const slots = [];
+      for (let i = 0; i < maxSlots; i++) {
+        slots.push(openPositions[i] || null);
+      }
+
+      function renderPositionCard(p, idx) {
+        if (!p) {
+          // Empty slot — dark/subtle placeholder
+          return `<div style="background:rgba(30,41,59,0.4);border:1px dashed rgba(148,163,184,0.2);border-radius:10px;padding:12px 14px;display:flex;align-items:center;justify-content:center;min-height:120px;">
+            <span style="color:#5a6a8a;font-size:13px;">🔒 Slot ${idx+1} — Empty</span>
+          </div>`;
+        }
+        const side = (p.side || '').toUpperCase();
+        const upnl = p.unrealized_pnl || 0;
+        const isProfit = upnl >= 0;
+        const entryTime = p.entry_time ? new Date(p.entry_time).toLocaleTimeString() : '—';
+        const lev = p.leverage || '?';
+        const margin = p.quote_quantity ? Number(p.quote_quantity / (p.leverage || 1)).toFixed(2) : '—';
+        const slStr = p.stop_loss ? '$' + Number(p.stop_loss).toFixed(2) : '—';
+        const tpStr = p.take_profit ? '$' + Number(p.take_profit).toFixed(2) : '—';
+
+        // ROI % = price change × leverage
+        let roiPct = 0;
+        if (p.entry_price && p.current_price && Number(p.entry_price) > 0) {
+          const entry = Number(p.entry_price);
+          const curr = Number(p.current_price);
+          const rawChange = (curr - entry) / entry;
+          const dirChange = side === 'BUY' ? rawChange : -rawChange;
+          roiPct = dirChange * (p.leverage || 1) * 100;
+        }
+        const roiStr = (roiPct >= 0 ? '+' : '') + roiPct.toFixed(2) + '%';
+
+        // Palette: green for profit, red for loss
+        const pal = isProfit
+          ? { bg: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.3)', accent: '#22c55e', sym: '#4ade80' }
+          : { bg: 'rgba(239,68,68,0.08)',  border: '1px solid rgba(239,68,68,0.3)',  accent: '#ef4444', sym: '#f87171' };
+
+        return `<div style="background:${pal.bg};border:${pal.border};border-radius:10px;padding:12px 14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <div style="min-width:0;">
+              <span style="font-weight:700;font-size:15px;color:${pal.sym};white-space:nowrap;">${p.symbol || '—'}</span>
+              <span class="badge ${side === 'BUY' || side === 'LONG' ? 'green' : 'red'}" style="font-size:9px;margin-left:6px;vertical-align:middle;">${side === 'BUY' ? 'LONG' : side}</span>
+            </div>
+            <div style="text-align:right;flex-shrink:0;margin-left:6px;">
+              <div style="font-size:16px;font-weight:800;color:${pal.accent};line-height:1.2;">${roiStr}</div>
+              <div style="font-size:9px;color:${pal.accent};opacity:0.6;line-height:1;">ROI</div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:11px;">
+            <div><span style="color:#5a6a8a;">Entry</span><br><span style="font-weight:600;color:#e2e8f0;font-size:12px;">${p.entry_price ? '$' + Number(p.entry_price).toFixed(2) : '—'}</span></div>
+            <div><span style="color:#5a6a8a;">Size</span><br><span style="color:#e2e8f0;font-size:12px;">${p.quantity ? Number(p.quantity).toFixed(4) : '—'}</span></div>
+            <div><span style="color:#5a6a8a;">Lvg</span><br><span class="badge yellow" style="font-size:9px;">${lev}x</span></div>
+            <div><span style="color:#5a6a8a;">Margin</span><br><span style="color:#94a3b8;font-size:12px;">$${margin}</span></div>
+            <div><span style="color:#5a6a8a;">PnL</span><br><span style="color:${pal.accent};font-weight:700;font-size:12px;">${upnl >= 0 ? '+' : ''}${Number(upnl).toFixed(2)}</span></div>
+            <div><span style="color:#5a6a8a;">Time</span><br><span style="font-size:10px;color:#5a6a8a;">${entryTime}</span></div>
+          </div>
+        </div>`;
+      }
+
+      pb.innerHTML = `<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+        ${slots.map((s, i) => renderPositionCard(s, i)).join('')}
+      </div>`;
 
       // Trades → Recent Activity — only rebuild the table body
       const tb = document.getElementById('tradesBody');
@@ -622,6 +698,239 @@
         section.style.display = 'block';
       } catch (e) {
         // Silently fail — rankings are non-critical
+      }
+    }
+
+    async function fetchOpportunities() {
+      try {
+        const resp = await fetch('/api/opportunities');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const opps = data.opportunities || [];
+        const hotOpps = opps.filter(o => o.confidence >= 70 && !o.brewing);
+        const watchOpps = opps.filter(o => o.confidence >= 40 && o.confidence < 70 && !o.brewing);
+        const brewingOpps = opps.filter(o => o.brewing || o.confidence < 40);
+
+        const section = document.getElementById('hotNowSection');
+        const container = document.getElementById('hotNowContainer');
+        const time = document.getElementById('hotTime');
+
+        time.textContent = `· ${data.timestamp ? fmtTime(data.timestamp) : ''}`;
+
+        if (hotOpps.length === 0 && watchOpps.length === 0) {
+          section.style.display = 'none';
+          return;
+        }
+
+        let html = '';
+
+        // HOT entries
+        if (hotOpps.length) {
+          html += `<div style="margin-bottom:10px;"><strong style="color:#f59e0b;">🚀 Ready to Trade</strong></div>`;
+          hotOpps.forEach(o => {
+            const dirColor = o.direction === 'LONG' ? '#6ee7b7' : '#fca5a5';
+            html += `<div class="pair-card" style="border-left:3px solid ${dirColor};margin-bottom:8px;">
+              <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                <span style="font-weight:700;font-size:16px;color:#e2e8f0;">${o.symbol}</span>
+                <span class="badge" style="background:${dirColor === '#6ee7b7' ? '#064e3b' : '#450a0a'};color:${dirColor};">${o.direction}</span>
+                <span style="color:#f59e0b;font-weight:700;font-size:18px;">${o.confidence}%</span>
+                <span class="mini-badge" style="background:#0c1d38;color:#60a5fa;">${o.primary_timeframe}</span>
+                <span style="color:#94a3b8;font-size:12px;">$${o.price.toFixed(2)}</span>
+              </div>
+              <div style="font-size:12px;color:#5a6a8a;margin-top:4px;">${o.entry_notes}</div>
+            </div>`;
+          });
+        }
+
+        // Watch list
+        if (watchOpps.length) {
+          html += `<div style="margin-top:14px;margin-bottom:8px;"><strong style="color:#fde68a;">👀 Watching</strong></div>`;
+          watchOpps.forEach(o => {
+            const dirColor = o.direction === 'LONG' ? '#6ee7b7' : '#fca5a5';
+            html += `<div class="pair-card" style="border-left:2px solid ${dirColor};margin-bottom:6px;padding:8px 12px;">
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <span style="font-weight:600;color:#e2e8f0;">${o.symbol}</span>
+                <span style="color:${dirColor};font-size:12px;">${o.direction}</span>
+                <span style="color:#fde68a;">${o.confidence}%</span>
+                <span style="color:#5a6a8a;font-size:11px;">${o.entry_notes}</span>
+              </div>
+            </div>`;
+          });
+        }
+
+        // Brewing
+        if (brewingOpps.length) {
+          html += `<div style="margin-top:10px;font-size:12px;color:#5a6a8a;">
+            🔄 ${brewingOpps.length} pair(s) brewing — not yet ready, getting close</div>`;
+        }
+
+        container.innerHTML = html;
+        section.style.display = 'block';
+      } catch (e) {
+        // Silently fail — non-critical
+      }
+    }
+
+    async function fetchPairSuitability() {
+      try {
+        const resp = await fetch('/api/pair-suitability');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const pairs = data.pairs || [];
+        if (pairs.length === 0) return;
+
+        const section = document.getElementById('suitabilitySection');
+        const container = document.getElementById('suitabilityContainer');
+        const time = document.getElementById('suitabilityTime');
+
+        time.textContent = `· ${data.scan_timestamp ? fmtTime(data.scan_timestamp) : 'cached'}`;
+
+        container.innerHTML = `
+          <div style="margin-bottom:12px;font-size:13px;color:#94a3b8;">
+            Scored ${data.total_scored} pairs · Top picks: <strong style="color:#6ee7b7;">${(data.top_picks || []).join(', ')}</strong>
+          </div>
+          ${pairs.map(p => {
+            const scorePct = (p.composite_score * 100).toFixed(0);
+            const scoreColor = p.composite_score >= 0.7 ? '#6ee7b7' : p.composite_score >= 0.4 ? '#fde68a' : '#fca5a5';
+            const isTop = (data.top_picks || []).includes(p.symbol);
+            return `<div class="pair-card" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;${isTop ? 'border-left:3px solid #6ee7b7;' : ''}">
+              <span style="font-weight:700;min-width:80px;">${p.symbol}${isTop ? ' <span class="badge green" style="font-size:9px;">✓</span>' : ''}</span>
+              <span class="mini-badge" style="background:#0c1d38;color:#60a5fa;">ATR ${p.atr_pct.toFixed(1)}%</span>
+              <span class="mini-badge" style="background:#0c1d38;color:#fde68a;">ADX ${p.adx.toFixed(0)}</span>
+              <span class="mini-badge" style="background:#0c1d38;color:#a78bfa;">${p.regime_label}</span>
+              <span style="color:${scoreColor};font-weight:600;font-size:14px;">${scorePct}%</span>
+              <div style="font-size:11px;color:#5a6a8a;display:flex;gap:8px;width:100%;margin-top:4px;">
+                <span>Movement: ${(p.movement_score * 100).toFixed(0)}%</span>
+                <span>Trend: ${(p.trend_score * 100).toFixed(0)}%</span>
+                <span>Volume: ${(p.volume_score * 100).toFixed(0)}%</span>
+                <span>Funding: ${(p.funding_score * 100).toFixed(0)}%</span>
+                <span>Smooth: ${(p.smoothness_score * 100).toFixed(0)}%</span>
+              </div>
+            </div>`;
+          }).join('')}
+          ${data.errors && data.errors.length
+            ? `<div style="margin-top:8px;font-size:12px;color:#fca5a5;">⚠️ ${data.errors.length} errors (check logs)</div>`
+            : ''}
+        `;
+        section.style.display = 'block';
+      } catch (e) {
+        // Silently fail — non-critical
+      }
+    }
+
+    async function runSuitabilityScan() {
+      const btn = event.target;
+      btn.disabled = true;
+      btn.textContent = '🔬 Scanning...';
+      try {
+        const resp = await fetch('/api/run-suitability', { method: 'POST' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        await fetchPairSuitability(); // Re-render with fresh data
+      } catch (e) {
+        alert('Suitability scan failed: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '🔬 Run Scan Now';
+      }
+    }
+
+    async function fetchShadowAnalysis() {
+      try {
+        const resp = await fetch('/api/shadow-analysis?window_days=30');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data.total_trades_analyzed || data.total_trades_analyzed === 0) return;
+
+        const section = document.getElementById('shadowSection');
+        const container = document.getElementById('shadowContainer');
+        const time = document.getElementById('shadowTime');
+
+        time.textContent = `· ${data.timestamp ? fmtTime(data.timestamp) : ''}`;
+
+        const biases = data.biases || {};
+        const strategies = data.strategies || {};
+        const stratNames = Object.keys(strategies);
+        const healthColor = biases.overall_health === 'good' ? '#6ee7b7' : biases.overall_health === 'fair' ? '#fde68a' : '#fca5a5';
+
+        let html = `
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px;">
+            <div class="mini-stat"><span class="label">Trades Analyzed</span><span class="value">${data.total_trades_analyzed}</span></div>
+            <div class="mini-stat"><span class="label">Period</span><span class="value">${data.time_period_days}d</span></div>
+            <div class="mini-stat"><span class="label">Health</span><span class="value" style="color:${healthColor};">${biases.overall_health || 'unknown'}</span></div>
+            ${data.top_performers && data.top_performers.length ? `<div class="mini-stat"><span class="label">Best Strategy</span><span class="value" style="color:#6ee7b7;">${data.top_performers[0]}</span></div>` : ''}
+          </div>`;
+
+        // Strategy profiles
+        if (stratNames.length) {
+          html += `<div style="margin-bottom:12px;"><strong style="color:#e2e8f0;">Strategy Breakdown</strong></div>`;
+          stratNames.forEach(name => {
+            const s = strategies[name];
+            const wrColor = s.win_rate >= 0.6 ? '#6ee7b7' : s.win_rate >= 0.4 ? '#fde68a' : '#fca5a5';
+            const pnlColor = s.total_pnl >= 0 ? '#6ee7b7' : '#fca5a5';
+            html += `<div class="pair-card" style="margin-bottom:8px;">
+              <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                <span style="font-weight:700;color:#e2e8f0;">${name}</span>
+                <span class="mini-badge" style="background:#0c1d38;color:#60a5fa;">${s.total_trades} trades</span>
+                <span style="color:${wrColor};font-weight:600;">${(s.win_rate * 100).toFixed(0)}% WR</span>
+                <span style="color:${pnlColor};">${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}</span>
+                <span style="color:#94a3b8;font-size:12px;">PF: ${s.profit_factor.toFixed(2)}</span>
+                <span style="color:#94a3b8;font-size:12px;">Sharpe: ${s.sharpe.toFixed(2)}</span>
+              </div>
+              <div style="font-size:11px;color:#5a6a8a;display:flex;gap:10px;margin-top:4px;">
+                <span>Avg hold: ${s.avg_holding_hours}h</span>
+                <span>Winners: ${s.win_avg_holding_hours}h</span>
+                <span>Losers: ${s.loss_avg_holding_hours}h</span>
+              </div>
+            </div>`;
+          });
+        }
+
+        // Bias detection
+        html += `<div style="margin-top:14px;margin-bottom:8px;"><strong style="color:#e2e8f0;">🧠 Behavioral Biases</strong></div>`;
+        const biasChecks = [
+          { key: 'disposition_effect', label: 'Disposition Effect', icon: '⚖️' },
+          { key: 'overtrading', label: 'Overtrading', icon: '📊' },
+          { key: 'chase_entries', label: 'Chase/Revenge', icon: '🏃' },
+          { key: 'anchoring', label: 'Anchoring', icon: '⚓' },
+        ];
+
+        biasChecks.forEach(b => {
+          const info = biases[b.key] || {};
+          const detected = info.detected;
+          const bgColor = detected ? 'rgba(252,165,165,0.1)' : 'rgba(110,231,183,0.05)';
+          const icon = detected ? '⚠️' : '✅';
+          const textColor = detected ? '#fca5a5' : '#6ee7b7';
+          html += `<div style="background:${bgColor};border-radius:8px;padding:8px 12px;margin-bottom:6px;font-size:13px;display:flex;align-items:flex-start;gap:8px;">
+            <span>${icon}</span>
+            <div><strong style="color:${textColor};">${b.icon} ${b.label}:</strong>
+            <span style="color:#94a3b8;"> ${info.detail || 'No data'}</span></div>
+          </div>`;
+        });
+
+        // Recommendations
+        if (data.recommendations && data.recommendations.length) {
+          html += `<div style="margin-top:12px;"><strong style="color:#e2e8f0;">💡 Recommendations</strong></div>`;
+          data.recommendations.slice(0, 5).forEach(r => {
+            html += `<div style="padding:6px 0;font-size:13px;color:#94a3b8;">• ${r}</div>`;
+          });
+        }
+
+        container.innerHTML = html;
+        section.style.display = 'block';
+      } catch (e) {
+        // Silently fail — non-critical
+      }
+    }
+
+    async function refreshShadowAnalysis() {
+      const btn = event.target;
+      btn.disabled = true;
+      btn.textContent = '👤 Loading...';
+      try {
+        await fetchShadowAnalysis();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '👤 Refresh Analysis';
       }
     }
 

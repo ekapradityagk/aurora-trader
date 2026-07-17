@@ -1,54 +1,26 @@
-# =============================================================================
-# Aurora Trader — Global Configuration
-# =============================================================================
-# This YAML file is loaded by shared/config.py and merged with the built-in
-# defaults.  Sensitive values (API keys) should be set via environment
-# variables (see .env.example).
-# =============================================================================
-
 project:
-  name: "aurora-trader"
-  environment: "development"          # development | staging | production
-  log_level: "INFO"                   # DEBUG | INFO | WARNING | ERROR | CRITICAL
-  log_dir: "logs"
-  json_logging: false                 # JSON-formatted file logs (trade channel always plain-text)
-
-# ---------------------------------------------------------------------------
-# Exchange Connection
-# ---------------------------------------------------------------------------
+  name: aurora-trader
+  environment: development
+  log_level: INFO
+  log_dir: logs
+  json_logging: false
 exchange:
-  name: "binance"
-  testnet: false                       # Use real Binance account
-  api_key: ""                          # Override via AURORA_BINANCE_API_KEY
-  api_secret: ""                       # Override via AURORA_BINANCE_API_SECRET
+  name: binance
+  testnet: false
+  api_key: ''
+  api_secret: ''
   use_futures: true
-  default_leverage: 5
-  margin_type: "isolated"              # isolated | cross
+  default_leverage: 20
+  margin_type: isolated
   rate_limit:
     requests_per_minute: 1200
-
-# ---------------------------------------------------------------------------
-# Trading Strategies
-# ---------------------------------------------------------------------------
-# Each strategy has:
-#   - enabled: true/false
-#   - timeframes: triple-timeframe config (fast, medium, slow)
-#   - parameters: indicator and signal-specific settings
-#   - risk: per-strategy risk overrides
-#
-# To disable a strategy entirely, set enabled: false.
-# Per-strategy risk settings are applied on top of the global risk_management
-# block below.  Where both exist the per-strategy value wins.
-# ---------------------------------------------------------------------------
-
 strategies:
-  # -- EMA Crossover ---------------------------------------------------------
   ema_crossover:
     enabled: true
     timeframes:
-      fast: "5m"
-      medium: "1h"
-      slow: "4h"
+      fast: 5m
+      medium: 1h
+      slow: 4h
     parameters:
       ema_fast: 9
       ema_medium: 21
@@ -68,14 +40,12 @@ strategies:
       cooldown_candles: 5
       max_signals_per_day: 10
       min_confidence: 0.65
-
-  # -- RSI Divergence --------------------------------------------------------
   rsi_divergence:
     enabled: false
     timeframes:
-      fast: "5m"
-      medium: "1h"
-      slow: "4h"
+      fast: 5m
+      medium: 1h
+      slow: 4h
     parameters:
       rsi_period: 14
       rsi_oversold: 25
@@ -89,15 +59,13 @@ strategies:
       trailing_stop_pct: 0.6
       cooldown_candles: 8
       max_signals_per_day: 8
-      min_confidence: 0.70
-
-  # -- MACD Strategy ---------------------------------------------------------
+      min_confidence: 0.7
   macd_strategy:
     enabled: false
     timeframes:
-      fast: "15m"
-      medium: "1h"
-      slow: "4h"
+      fast: 15m
+      medium: 1h
+      slow: 4h
     parameters:
       macd_fast: 12
       macd_slow: 26
@@ -111,14 +79,12 @@ strategies:
       trailing_stop_pct: 0.5
       cooldown_candles: 6
       max_signals_per_day: 8
-      min_confidence: 0.60
-
-  # -- Bollinger Bands Reversal ----------------------------------------------
+      min_confidence: 0.6
   bbands_reversal:
     enabled: false
     timeframes:
-      fast: "5m"
-      medium: "1h"
+      fast: 5m
+      medium: 1h
     parameters:
       bb_period: 20
       bb_std_dev: 2.0
@@ -131,15 +97,13 @@ strategies:
       trailing_stop_pct: 0.4
       cooldown_candles: 5
       max_signals_per_day: 12
-      min_confidence: 0.60
-
-  # -- VWAP Trend ------------------------------------------------------------
+      min_confidence: 0.6
   vwap_trend:
     enabled: false
     timeframes:
-      fast: "5m"
-      medium: "15m"
-      slow: "1h"
+      fast: 5m
+      medium: 15m
+      slow: 1h
     parameters:
       vwap_period: 20
       deviation_multiplier: 1.5
@@ -152,91 +116,103 @@ strategies:
       cooldown_candles: 4
       max_signals_per_day: 15
       min_confidence: 0.55
-
-# ---------------------------------------------------------------------------
-# Risk Management — Global Settings
-# ---------------------------------------------------------------------------
 risk_management:
   global:
     max_position_size_usd: 10000.0
     max_leverage: 5
     max_daily_trades: 50
-    max_open_positions: 5
-    max_drawdown_pct: 15.0          # max allowable drawdown before halt
-    daily_loss_limit_pct: 5.0       # daily loss limit before trading halts
+    max_open_positions: 6
+    max_drawdown_pct: 15.0
+    daily_loss_limit_pct: 5.0
     max_slippage_pct: 0.1
     min_volume_usdt: 100000.0
-
-  # -- Auto-Rollback (versioned strategy rollback) ---------------------------
   auto_rollback:
     enabled: true
-    min_winrate: 0.50               # rollback if winrate < this threshold
-    evaluation_window: 20           # number of trades to evaluate
+    min_winrate: 0.5
+    evaluation_window: 20
     max_versions_to_keep: 10
-
-# ---------------------------------------------------------------------------
-# Wallet Scanner
-# ---------------------------------------------------------------------------
 wallet_scanner:
   enabled: false
-  api_base_url: "http://127.0.0.1:8902"
+  api_base_url: http://127.0.0.1:8902
   poll_interval_seconds: 60
   endpoints:
-    whale_tracker: "/api/v1/whale/transactions"
-    exchange_flow: "/api/v1/exchange/flows"
-    funding_rate: "/api/v1/funding/rates"
-    top_holders: "/api/v1/whale/holders"
-    smart_money: "/api/v1/whale/smart-money"
-    exchange_reserves: "/api/v1/exchange/reserves"
-    large_trades: "/api/v1/whale/large-trades"
-    stablecoin_flow: "/api/v1/exchange/stablecoin-flow"
-  api_key: ""                        # Override via AURORA_WALLET_API_KEY
-
-# ---------------------------------------------------------------------------
-# Learning Server (Bayesian hyperopt + regime detection)
-# ---------------------------------------------------------------------------
+    whale_tracker: /api/v1/whale/transactions
+    exchange_flow: /api/v1/exchange/flows
+    funding_rate: /api/v1/funding/rates
+    top_holders: /api/v1/whale/holders
+    smart_money: /api/v1/whale/smart-money
+    exchange_reserves: /api/v1/exchange/reserves
+    large_trades: /api/v1/whale/large-trades
+    stablecoin_flow: /api/v1/exchange/stablecoin-flow
+  api_key: ''
 learning_server:
   enabled: true
-  api_base_url: "http://127.0.0.1:8901"
+  api_base_url: http://127.0.0.1:8901
   optuna:
     n_trials: 100
     timeout_seconds: 3600
-    storage: "sqlite:///data/optuna_study.db"
-    direction: "maximize"
+    storage: sqlite:///data/optuna_study.db
+    direction: maximize
   regime_detection:
     enabled: true
     lookback_periods: 100
     min_regime_confidence: 0.6
-
-# ---------------------------------------------------------------------------
-# Trading Server
-# ---------------------------------------------------------------------------
+pair_universe:
+  active_count: 6
+  min_volume_usdt: 50000000
+  lookback_days: 7
+  candidates:
+  - BTCUSDT
+  - ETHUSDT
+  - BNBUSDT
+  - SOLUSDT
+  - XRPUSDT
+  - DOGEUSDT
+  - ADAUSDT
+  - AVAXUSDT
+  - DOTUSDT
+  - LINKUSDT
+  - UNIUSDT
+  - MATICUSDT
+  - ATOMUSDT
+  - LTCUSDT
+  - BCHUSDT
+  - SUIUSDT
+  - NEARUSDT
+  - APTUSDT
+  - ARBUSDT
+  - OPUSDT
+  - SEIUSDT
+  - TIAUSDT
+  - INJUSDT
+  - PENDLEUSDT
+  - WIFUSDT
+  - PEPEUSDT
+  - FETUSDT
+  - RUNEUSDT
+  - AAVEUSDT
 trading_server:
-  host: "0.0.0.0"
+  host: 0.0.0.0
   port: 8900
   symbols:
-    - "BTCUSDT"
-    - "ETHUSDT"
-    - "SOLUSDT"
-    - "SUIUSDT"
-    - "NEARUSDT"
-    - "BNBUSDT"
+  - TIAUSDT
+  - XRPUSDT
+  - AVAXUSDT
+  - SOLUSDT
+  - UNIUSDT
+  - ATOMUSDT
   database:
-    path: "data/trading.db"
+    path: data/trading.db
   websocket:
     max_retries: 5
     retry_delay_seconds: 2.0
     ping_interval_seconds: 30
-
-# ---------------------------------------------------------------------------
-# Integration Server (Git versioning, winrate DB, rollback API)
-# ---------------------------------------------------------------------------
 integration:
-  host: "0.0.0.0"
+  host: 0.0.0.0
   port: 8903
   git:
     auto_commit: true
     auto_tag: true
-    tag_prefix: "v"
+    tag_prefix: v
   database:
-    path: "data/integration.db"
+    path: data/integration.db
