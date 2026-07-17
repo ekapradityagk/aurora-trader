@@ -574,6 +574,17 @@
               <div style="font-size:9px;color:${pal.accent};opacity:0.6;line-height:1;">ROI</div>
             </div>
           </div>
+          <!-- Trailing status badge -->
+          ${p.metadata && p.metadata.trailing_active ? `<div style="margin:6px 0 4px;padding:3px 8px;background:rgba(245,158,11,0.15);border:1px solid rgba(245,158,11,0.3);border-radius:6px;display:flex;justify-content:space-between;align-items:center;font-size:10px;">
+            <span style="color:#f59e0b;font-weight:600;">🔴 TRAILING</span>
+            <span style="color:#f59e0b;">SL: ${slStr}</span>
+          </div>` : p.stop_loss && roiPct > 5 ? `<div style="margin:6px 0 4px;padding:3px 8px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.25);border-radius:6px;display:flex;justify-content:space-between;align-items:center;font-size:10px;">
+            <span style="color:#4ade80;font-weight:600;">🟢 BREAK-EVEN</span>
+            <span style="color:#4ade80;">SL: ${slStr}</span>
+          </div>` : `<div style="margin:6px 0 4px;padding:3px 8px;background:rgba(148,163,184,0.08);border:1px solid rgba(148,163,184,0.15);border-radius:6px;display:flex;justify-content:space-between;align-items:center;font-size:10px;">
+            <span style="color:#94a3b8;font-weight:600;">🟡 INITIAL SL</span>
+            <span style="color:#94a3b8;">SL: ${slStr}</span>
+          </div>`}
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:11px;">
             <div><span style="color:#5a6a8a;">Entry</span><br><span style="font-weight:600;color:#e2e8f0;font-size:12px;">${p.entry_price ? '$' + Number(p.entry_price).toFixed(2) : '—'}</span></div>
             <div><span style="color:#5a6a8a;">Size</span><br><span style="color:#e2e8f0;font-size:12px;">${p.quantity ? Number(p.quantity).toFixed(4) : '—'}</span></div>

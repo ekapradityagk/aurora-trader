@@ -230,6 +230,7 @@ class IntegrationServer:
         self._app.router.add_get("/status", self._handle_status)
         self._app.router.add_get("/api/trading/health", self._handle_proxy_health)
         self._app.router.add_get("/api/trading/positions", self._handle_proxy_positions)
+        self._app.router.add_get("/api/trading/trailing-events", self._handle_proxy_trailing_events)
         self._app.router.add_get("/api/trading/signals", self._handle_proxy_signals)
         self._app.router.add_get("/api/dashboard", self._handle_dashboard)
         self._app.router.add_get("/api/pair-rankings", self._handle_proxy_pair_rankings)
@@ -754,6 +755,10 @@ class IntegrationServer:
     async def _handle_proxy_positions(self, request: web.Request) -> web.Response:
         """GET /api/trading/positions → trading server /positions."""
         return await self._proxy_to_trading("/positions", request)
+
+    async def _handle_proxy_trailing_events(self, request: web.Request) -> web.Response:
+        """GET /api/trading/trailing-events → trading server /api/events/trailing."""
+        return await self._proxy_to_trading("/api/events/trailing", request)
 
     async def _handle_proxy_signals(self, request: web.Request) -> web.Response:
         """GET /api/trading/signals → trading server /signals."""

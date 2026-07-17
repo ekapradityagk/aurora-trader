@@ -89,6 +89,7 @@ class TradingServer:
         self._host = host or ts_cfg.get("host", "127.0.0.1")
         self._port = port or ts_cfg.get("port", 8900)
         self._symbols = symbols or ts_cfg.get("symbols", DEFAULT_SYMBOLS)
+        self._discord_webhook = ts_cfg.get("discord_webhook_url", "") or ""
 
         # Core components (lazy-init)
         self._ws: Optional[BinanceWebSocket] = None
@@ -123,6 +124,10 @@ class TradingServer:
         self._daily_trade_count: int = 0
         # Last reset date for daily counters
         self._current_date: str = ""
+
+        # Trailing stop events (ring buffer for dashboard + Discord)
+        self._trailing_events: List[Dict[str, Any]] = []
+        self._max_trailing_events = 50
 
         # --- Concurrency ---
         self._lock = asyncio.Lock()
@@ -886,13 +891,33 @@ class TradingServer:
                             position, current_price
                         )
                         if new_sl is not None:
+                            old_sl = position.stop_loss
                             position.stop_loss = new_sl
                             if action == "trailing":
+                                was_already = meta.get("trailing_active", False)
                                 meta["trailing_active"] = True
                                 self._log.info(
                                     f"{symbol} | Trailing stop active: "
                                     f"sl={new_sl:.2f}"
                                 )
+                                # Record event if SL actually changed (avoid duplicate spam)
+                                if old_sl != new_sl:
+                                    event = {
+                                        "symbol": symbol,
+                                        "type": "updated" if was_already else "activated",
+                                        "entry_price": float(position.entry_price),
+                                        "current_price": float(current_price),
+                                        "stop_loss": float(new_sl),
+                                        "leverage": position.leverage,
+                                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    }
+                                    self._trailing_events.append(event)
+                                    if len(self._trailing_events) > self._max_trailing_events:
+                                        self._trailing_events.pop(0)
+                                    # Fire Discord webhook
+                                    asyncio.ensure_future(
+                                        self._send_discord_webhook(event)
+                                    )
                             elif action == "break_even":
                                 self._log.info(
                                     f"{symbol} | Break-even activated: "
@@ -1040,6 +1065,49 @@ class TradingServer:
         except Exception as exc:
             self._log.warning(f"Could not fetch balance: {exc}, using {self._account_balance:.2f}")
 
+    async def _send_discord_webhook(self, event: Dict[str, Any]) -> None:
+        """Send a trailing stop event to Discord via webhook."""
+        if not self._discord_webhook:
+            return
+        try:
+            symbol = event["symbol"]
+            ev_type = event["type"]
+            entry = event["entry_price"]
+            curr = event["current_price"]
+            sl = event["stop_loss"]
+            lev = event["leverage"]
+            pnl_pct = ((curr - entry) / entry * lev * 100) if entry else 0
+            sl_pct = ((sl - entry) / entry * lev * 100) if entry else 0
+
+            title = "🔴 Trailing Activated" if ev_type == "activated" else "🔶 Trailing Updated"
+            color = 16753920 if ev_type == "activated" else 16041215  # orange / yellow
+
+            embed = {
+                "title": f"{title} — {symbol}",
+                "color": color,
+                "fields": [
+                    {"name": "Entry", "value": f"${entry:.4f}", "inline": True},
+                    {"name": "Current", "value": f"${curr:.4f}", "inline": True},
+                    {"name": "Trail Stop", "value": f"${sl:.4f}", "inline": True},
+                    {"name": "ROI", "value": f"{pnl_pct:+.2f}%", "inline": True},
+                    {"name": "Locked Profit", "value": f"{sl_pct:+.2f}%", "inline": True},
+                    {"name": "Leverage", "value": f"{lev}x", "inline": True},
+                ],
+                "timestamp": event.get("timestamp", ""),
+            }
+
+            payload = {"embeds": [embed]}
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self._discord_webhook,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status not in (200, 204):
+                        self._log.warning(f"Discord webhook returned {resp.status}")
+        except Exception as exc:
+            self._log.warning(f"Failed to send Discord webhook: {exc}")
+
     # ------------------------------------------------------------------
     # Regime Detection (simple)
     # ------------------------------------------------------------------
@@ -1098,6 +1166,7 @@ class TradingServer:
         self._app.router.add_get("/signals", self._handle_signals)
         self._app.router.add_post("/api/execute", self._handle_execute)
         self._app.router.add_post("/api/reload-symbols", self._handle_reload_symbols)
+        self._app.router.add_get("/api/events/trailing", self._handle_trailing_events)
 
         # Start
         self._runner = web.AppRunner(self._app)
@@ -1484,6 +1553,18 @@ class TradingServer:
             return web.json_response(
                 {"error": f"Symbol reload failed: {exc}"}, status=500
             )
+
+    async def _handle_trailing_events(self, request: web.Request) -> web.Response:
+        """GET /api/events/trailing — return recent trailing stop events."""
+        since = request.query.get("since", "")
+        events = self._trailing_events
+        if since:
+            events = [e for e in events if e.get("timestamp", "") > since]
+        return web.json_response({
+            "count": len(events),
+            "events": events[-20:],  # last 20 max
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
 
 
 # ---------------------------------------------------------------------------
