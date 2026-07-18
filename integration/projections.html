@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aurora Trader — Capital Projections</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --gold: #d29922;
+    --cell-bg: #1c2128;
+    --cell-border: #30363d;
+    --hover: #1f2937;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 24px;
+  }
+
+  .container {
+    max-width: 1000px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    margin-bottom: 4px;
+    color: var(--text);
+  }
+
+  .subtitle {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    margin-bottom: 24px;
+  }
+
+  /* ---- Config Panel ---- */
+  .config-panel {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 24px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    align-items: flex-end;
+  }
+
+  .config-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .config-group label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 500;
+  }
+
+  .config-group input,
+  .config-group select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    color: var(--text);
+    font-size: 0.9rem;
+    min-width: 140px;
+  }
+
+  .config-group input:focus,
+  .config-group select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.15);
+  }
+
+  .btn {
+    padding: 8px 20px;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  .btn:hover { opacity: 0.85; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-secondary { background: #21262d; color: var(--text); border: 1px solid var(--border); }
+
+  .config-actions {
+    display: flex;
+    gap: 8px;
+    margin-left: auto;
+  }
+
+  /* ---- Calendar ---- */
+  .month-container {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+
+  .month-header {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: var(--text);
+    text-align: center;
+  }
+
+  .calendar-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 4px;
+  }
+
+  .day-header {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    text-align: center;
+    padding: 6px 0;
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+
+  .day-cell {
+    background: var(--cell-bg);
+    border: 1px solid var(--cell-border);
+    border-radius: 6px;
+    padding: 8px 6px;
+    min-height: 64px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    transition: background 0.15s;
+    position: relative;
+  }
+
+  .day-cell:hover {
+    background: var(--hover);
+  }
+
+  .day-cell.empty {
+    background: transparent;
+    border: none;
+    min-height: 64px;
+  }
+
+  .day-cell .day-num {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    position: absolute;
+    top: 4px;
+    left: 6px;
+  }
+
+  .day-cell .projected-value {
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: var(--green);
+  }
+
+  .day-cell .projected-value.negative {
+    color: var(--red);
+  }
+
+  .day-cell .day-gain {
+    font-size: 0.65rem;
+    color: var(--text-muted);
+  }
+
+  .day-cell.today {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+  }
+
+  .day-cell.start-day {
+    border-color: var(--gold);
+    background: rgba(210, 153, 34, 0.08);
+  }
+
+  .day-cell.has-input {
+    border-color: var(--gold);
+    background: rgba(210, 153, 34, 0.04);
+  }
+
+  /* ---- Summary ---- */
+  .summary-bar {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+
+  .summary-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    text-align: center;
+  }
+
+  .summary-card .label {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+
+  .summary-card .value {
+    font-size: 1.3rem;
+    font-weight: 700;
+  }
+
+  .summary-card .value.green { color: var(--green); }
+  .summary-card .value.gold { color: var(--gold); }
+  .summary-card .value.accent { color: var(--accent); }
+
+  /* ---- Loading ---- */
+  .loading {
+    text-align: center;
+    padding: 48px;
+    color: var(--text-muted);
+  }
+
+  .loading .spinner {
+    display: inline-block;
+    width: 32px;
+    height: 32px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-bottom: 12px;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ---- Profiles modal ---- */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 100;
+    align-items: center;
+    justify-content: center;
+  }
+  .modal-overlay.active { display: flex; }
+
+  .modal {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    min-width: 360px;
+    max-width: 500px;
+    width: 90%;
+  }
+
+  .modal h3 {
+    margin-bottom: 16px;
+  }
+
+  .modal input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-size: 0.9rem;
+    margin-bottom: 12px;
+  }
+
+  .modal-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  .profile-list {
+    max-height: 240px;
+    overflow-y: auto;
+    margin-bottom: 12px;
+  }
+
+  .profile-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 6px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .profile-item:hover { background: var(--hover); }
+
+  .profile-item .name { font-weight: 500; }
+  .profile-item .desc { font-size: 0.75rem; color: var(--text-muted); }
+
+  .profile-item .del-btn {
+    background: none;
+    border: none;
+    color: var(--red);
+    cursor: pointer;
+    font-size: 1.1rem;
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+  .profile-item .del-btn:hover { background: rgba(248, 81, 73, 0.1); }
+
+  /* ---- Month nav ---- */
+  .month-nav {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+  .month-nav button {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+  .month-nav button:hover { background: var(--hover); }
+  .month-nav span { font-size: 0.85rem; color: var(--text-muted); }
+
+  /* ---- Responsive ---- */
+  @media (max-width: 640px) {
+    .config-panel { flex-direction: column; }
+    .config-actions { margin-left: 0; width: 100%; }
+    .config-actions .btn { flex: 1; }
+    .day-cell { min-height: 52px; padding: 6px 4px; }
+    .day-cell .projected-value { font-size: 0.75rem; }
+    body { padding: 12px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📈 Capital Projection Calendar</h1>
+  <p class="subtitle">Default vs Adjusted — input real PnL to see your adaptive projection</p>
+
+  <!-- Summary Bar -->
+  <div class="summary-bar" id="summaryBar">
+    <div class="summary-card" style="border-color: var(--accent);">
+      <div class="label">Default (config)</div>
+      <div class="value accent" id="sumStart">$30.00</div>
+    </div>
+    <div class="summary-card" style="border-color: var(--accent);">
+      <div class="label">Default End</div>
+      <div class="value accent" id="sumDefaultEnd">—</div>
+    </div>
+    <div class="summary-card" style="border-color: var(--green);">
+      <div class="label">Adjusted (adaptive)</div>
+      <div class="value green" id="sumAdjustedEnd">—</div>
+    </div>
+    <div class="summary-card" style="border-color: var(--gold);">
+      <div class="label">Total Gain</div>
+      <div class="value" id="sumGain">
+        <span class="value accent" style="font-size:0.85rem;" id="sumDefaultGain">—</span>
+        <span style="color:var(--text-muted);font-size:0.7rem;"> / </span>
+        <span class="value green" style="font-size:0.85rem;" id="sumAdjustedGain">—</span>
+      </div>
+    </div>
+    <div class="summary-card" style="border-color: var(--gold);">
+      <div class="label">Period</div>
+      <div class="value" id="sumPeriod" style="color:var(--text-muted);font-size:0.85rem;">—</div>
+    </div>
+  </div>
+
+  <!-- Adaptive Rate Info -->
+  <div id="adaptiveRateInfo" style="display:none; background:var(--card); border:1px solid var(--border); border-radius:8px; padding:12px 20px; margin-bottom:16px; font-size:0.8rem; color:var(--text-muted);">
+    <span>🎯 Target: <strong id="ariTarget">5%</strong></span>
+    <span style="margin:0 12px;">|</span>
+    <span>📊 Actual returns: <strong id="ariActualRates">—</strong></span>
+    <span style="margin:0 12px;">|</span>
+    <span>🧮 Adaptive rate: <strong id="ariAdaptive">—</strong></span>
+    <span style="margin:0 12px;">|</span>
+    <span>📝 Inputs: <strong id="ariInputCount">0</strong></span>
+  </div>
+
+  <!-- Chart Section -->
+  <div class="month-container" id="chartSection" style="display:none;">
+    <div class="month-header">📈 Default vs Adjusted — Projected Capital</div>
+    <div style="position:relative; height:240px; width:100%;">
+      <canvas id="projectionChart"></canvas>
+    </div>
+    <div style="display:flex;gap:16px;justify-content:center;margin-top:8px;font-size:0.75rem;color:var(--text-muted);">
+      <span>🔵 <span style="color:var(--accent);">Default</span></span>
+      <span>🟢 <span style="color:var(--green);">Adjusted</span></span>
+      <span>🟡 <span style="color:var(--gold);">Inputted dates</span></span>
+    </div>
+  </div>
+
+  <!-- Config Panel -->
+  <div class="config-panel">
+    <div class="config-group">
+      <label>Start Date</label>
+      <input type="date" id="startDate">
+    </div>
+    <div class="config-group">
+      <label>Starting Capital ($)</label>
+      <input type="number" id="startCapital" value="30" step="0.01" min="1">
+    </div>
+    <div class="config-group">
+      <label>Daily Target (%)</label>
+      <input type="number" id="dailyTarget" value="5" step="0.1" min="0.1" max="100">
+    </div>
+    <div class="config-group">
+      <label>Duration</label>
+      <select id="duration">
+        <option value="1">1 Month</option>
+        <option value="3">3 Months</option>
+        <option value="6">6 Months</option>
+        <option value="12" selected>1 Year</option>
+        <option value="24">2 Years</option>
+        <option value="60">5 Years</option>
+      </select>
+    </div>
+    <div class="config-actions">
+      <button class="btn btn-primary" onclick="calculate()">Calculate</button>
+      <button class="btn btn-secondary" onclick="showSaveModal()">💾 Save</button>
+      <button class="btn btn-secondary" onclick="showLoadModal()">📂 Load</button>
+    </div>
+  </div>
+
+  <!-- Month filter -->
+  <div class="month-nav" id="monthNav"></div>
+
+  <!-- Calendar Container -->
+  <div id="calendarContainer">
+    <div class="loading">
+      <div class="spinner"></div>
+      <div>Enter your parameters and click Calculate~</div>
+    </div>
+  </div>
+</div>
+
+<!-- Save Modal -->
+<div class="modal-overlay" id="saveModal">
+  <div class="modal">
+    <h3>💾 Save Profile</h3>
+    <input type="text" id="profileName" placeholder="Profile name (e.g., '5% aggressive')">
+    <input type="text" id="profileDesc" placeholder="Optional description">
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('saveModal')">Cancel</button>
+      <button class="btn btn-primary" onclick="saveProfile()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Load Modal -->
+<div class="modal-overlay" id="loadModal">
+  <div class="modal">
+    <h3>📂 Load Profile</h3>
+    <div class="profile-list" id="profileList">
+      <div style="color:var(--text-muted);text-align:center;padding:20px;">No saved profiles yet.</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeModal('loadModal')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- PnL Input Modal -->
+<div class="modal-overlay" id="pnlModal">
+  <div class="modal" style="min-width:320px;">
+    <h3>📝 Input Real PnL</h3>
+    <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:12px;" id="pnlModalDate">—</p>
+    <div class="config-group" style="margin-bottom:12px;">
+      <label>Profit / Loss ($)</label>
+      <input type="number" id="pnlInput" step="0.01" placeholder="+2.50 or -1.20" style="width:100%;">
+    </div>
+    <div class="config-group" style="margin-bottom:16px;">
+      <label>Notes (optional)</label>
+      <input type="text" id="pnlNotes" placeholder="e.g. good scalp on SOL" style="width:100%;">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="deletePnlInput()" id="pnlDeleteBtn" style="margin-right:auto;color:var(--red);">🗑 Delete</button>
+      <button class="btn btn-secondary" onclick="closeModal('pnlModal')">Cancel</button>
+      <button class="btn btn-primary" onclick="savePnlInput()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// =========================================================================
+// Number Formatting
+// =========================================================================
+function formatMoney(value) {
+  if (value === null || value === undefined || isNaN(value)) return '$0.00';
+  const abs = Math.abs(value);
+  const sign = value < 0 ? '-' : '';
+  if (abs >= 1_000_000_000) return `${sign}$${(abs / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `${sign}$${abs.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `${sign}$${abs.toFixed(2)}`;
+}
+
+function formatMoneyShort(value) {
+  if (value === null || value === undefined || isNaN(value)) return '$0';
+  const abs = Math.abs(value);
+  const sign = value < 0 ? '-' : '';
+  if (abs >= 1_000_000_000) return `${sign}$${(abs / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `${sign}$${(abs / 1_000).toFixed(1)}K`;
+  return `${sign}$${abs.toFixed(2)}`;
+}
+
+function formatPct(value) {
+  if (value === null || value === undefined || isNaN(value)) return '0%';
+  const abs = Math.abs(value);
+  const sign = value < 0 ? '-' : '';
+  if (abs >= 1_000_000_000) return `${sign}${(abs / 1_000_000_000).toFixed(2)}B%`;
+  if (abs >= 1_000_000) return `${sign}${(abs / 1_000_000).toFixed(2)}M%`;
+  if (abs >= 1_000) return `${sign}${(abs / 1_000).toFixed(2)}K%`;
+  return `${sign}${abs.toFixed(2)}%`;
+}
+
+// =========================================================================
+// State
+// =========================================================================
+let apiData = null;       // full response from /api/projections/calculate
+let currentMonthOffset = 0;
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// Track which date is being edited in the PnL modal
+let pnlEditDate = null;
+
+// =========================================================================
+// Init
+// =========================================================================
+document.addEventListener('DOMContentLoaded', () => {
+  const sd = document.getElementById('startDate');
+  sd.value = '2026-07-17';
+  calculate();
+});
+
+// =========================================================================
+// API: Calculate
+// =========================================================================
+async function calculate() {
+  const startDate = document.getElementById('startDate').value;
+  const startCapital = parseFloat(document.getElementById('startCapital').value) || 30;
+  const dailyTarget = parseFloat(document.getElementById('dailyTarget').value) || 5;
+  const duration = parseInt(document.getElementById('duration').value) || 12;
+
+  if (!startDate) { alert('Please select a start date'); return; }
+
+  document.getElementById('calendarContainer').innerHTML = `
+    <div class="loading">
+      <div class="spinner"></div>
+      <div>Calculating projections...</div>
+    </div>`;
+
+  try {
+    const resp = await fetch(`/api/projections/calculate?start_date=${startDate}&capital=${startCapital}&target_pct=${dailyTarget}&duration_months=${duration}`);
+    apiData = await resp.json();
+    if (apiData.error) { alert(apiData.error); return; }
+
+    currentMonthOffset = 0;
+    renderSummary();
+    renderAdaptiveRateInfo();
+    renderChart();
+    renderMonthNav();
+    renderCalendar();
+  } catch (err) {
+    document.getElementById('calendarContainer').innerHTML = `<div class="loading" style="color:var(--red)">Error: ${err.message}</div>`;
+  }
+}
+
+// =========================================================================
+// Render Summary
+// =========================================================================
+function renderSummary() {
+  if (!apiData) return;
+  const d = apiData;
+  document.getElementById('sumStart').textContent = formatMoney(d.starting_capital);
+  document.getElementById('sumDefaultEnd').textContent = formatMoney(d.default.ending_capital);
+  document.getElementById('sumAdjustedEnd').textContent = formatMoney(d.adjusted.ending_capital);
+  document.getElementById('sumDefaultGain').textContent = formatMoney(d.default.total_gain);
+  document.getElementById('sumAdjustedGain').textContent = formatMoney(d.adjusted.total_gain);
+  document.getElementById('sumPeriod').textContent = `${d.start_date} → ${d.end_date}`;
+}
+
+// =========================================================================
+// Render Adaptive Rate Info
+// =========================================================================
+function renderAdaptiveRateInfo() {
+  if (!apiData || !apiData.adaptive_rate) {
+    document.getElementById('adaptiveRateInfo').style.display = 'none';
+    return;
+  }
+  const ar = apiData.adaptive_rate;
+  document.getElementById('ariTarget').textContent = `${ar.configured_target}%`;
+  document.getElementById('ariActualRates').textContent = ar.actual_rates.length
+    ? ar.actual_rates.map(r => `${r.toFixed(2)}%`).join(', ')
+    : '—';
+  document.getElementById('ariAdaptive').textContent = ar.median_rate
+    ? `${ar.median_rate.toFixed(2)}%`
+    : `${ar.configured_target}% (no inputs yet)`;
+  document.getElementById('ariInputCount').textContent = ar.total_inputs;
+  document.getElementById('adaptiveRateInfo').style.display = 'block';
+}
+
+// =========================================================================
+// Render Chart (Default vs Adjusted)
+// =========================================================================
+let chartInstance = null;
+
+function renderChart() {
+  if (!apiData) {
+    document.getElementById('chartSection').style.display = 'none';
+    return;
+  }
+
+  const defProjs = apiData.default.projections;
+  const adjProjs = apiData.adjusted.projections;
+
+  // Sample data for chart: show every Nth label to avoid crowding
+  const totalPoints = defProjs.length;
+  const maxLabels = 60; // show at most ~60 labels
+  const step = Math.max(1, Math.floor(totalPoints / maxLabels));
+
+  const labels = [];
+  const defaultValues = [];
+  const adjustedValues = [];
+  const inputMarkers = []; // background color for inputted dates
+
+  for (let i = 0; i < totalPoints; i++) {
+    const dateObj = new Date(defProjs[i].date + 'T00:00:00');
+    const label = i % step === 0 || i === totalPoints - 1
+      ? `${dateObj.getMonth() + 1}/${dateObj.getDate()}`
+      : '';
+    labels.push(label);
+
+    defaultValues.push(defProjs[i].projected_capital);
+    adjustedValues.push(adjProjs[i].projected_capital);
+    inputMarkers.push(defProjs[i].has_input);
+  }
+
+  // Find indices where inputs exist for annotation
+  const inputIndices = [];
+  for (let i = 0; i < totalPoints; i++) {
+    if (defProjs[i].has_input) inputIndices.push(i);
+  }
+
+  const ctx = document.getElementById('projectionChart').getContext('2d');
+
+  // Destroy previous chart if exists
+  if (chartInstance) {
+    chartInstance.destroy();
+  }
+
+  // Format money for tooltips
+  const fmt = (v) => {
+    if (v >= 1_000_000_000) return `$${(v / 1_000_000_000).toFixed(2)}B`;
+    if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(2)}M`;
+    if (v >= 1_000) return `$${v.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+    return `$${v.toFixed(2)}`;
+  };
+
+  chartInstance = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Default',
+          data: defaultValues,
+          borderColor: '#58a6ff',
+          backgroundColor: 'rgba(88, 166, 255, 0.05)',
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHitRadius: 4,
+          tension: 0.1,
+          fill: false,
+          order: 2,
+        },
+        {
+          label: 'Adjusted',
+          data: adjustedValues,
+          borderColor: '#3fb950',
+          backgroundColor: 'rgba(63, 185, 80, 0.05)',
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHitRadius: 4,
+          tension: 0.1,
+          fill: false,
+          order: 1,
+        },
+        // Input markers as scatter points
+        {
+          label: 'Real PnL Input',
+          data: inputIndices.map(i => ({ x: i, y: adjustedValues[i] })),
+          borderColor: '#d29922',
+          backgroundColor: '#d29922',
+          pointRadius: 5,
+          pointHoverRadius: 8,
+          pointStyle: 'triangle',
+          showLine: false,
+          order: 0,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: {
+        mode: 'index',
+        intersect: false,
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1c2128',
+          titleColor: '#e6edf3',
+          bodyColor: '#8b949e',
+          borderColor: '#30363d',
+          borderWidth: 1,
+          padding: 10,
+          callbacks: {
+            title: (items) => {
+              if (items.length) {
+                const idx = items[0].dataIndex;
+                return defProjs[idx]?.date || '';
+              }
+              return '';
+            },
+            label: (item) => {
+              const val = item.raw;
+              if (item.dataset.label === 'Real PnL Input') {
+                const idx = item.dataIndex;
+                const inputIdx = inputIndices[idx];
+                const pnl = adjProjs[inputIdx]?.daily_pnl || 0;
+                return `📝 ${item.dataset.label}: ${fmt(val)} (PnL: ${pnl >= 0 ? '+' : ''}${fmt(pnl)})`;
+              }
+              return `${item.dataset.label}: ${fmt(val)}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          display: true,
+          ticks: {
+            color: '#8b949e',
+            maxTicksLimit: 15,
+            font: { size: 10 },
+          },
+          grid: {
+            color: 'rgba(48, 54, 61, 0.3)',
+          },
+        },
+        y: {
+          display: true,
+          ticks: {
+            color: '#8b949e',
+            font: { size: 10 },
+            callback: (v) => fmt(v),
+          },
+          grid: {
+            color: 'rgba(48, 54, 61, 0.3)',
+          },
+        },
+      },
+    },
+  });
+
+  document.getElementById('chartSection').style.display = 'block';
+}
+
+// =========================================================================
+// Month Navigation
+// =========================================================================
+function renderMonthNav() {
+  if (!apiData) { document.getElementById('monthNav').innerHTML = ''; return; }
+  const projs = apiData.default.projections;
+  const months = [...new Set(projs.map(d => d.date.substring(0, 7)))].sort();
+  const total = months.length;
+  const container = document.getElementById('monthNav');
+  container.innerHTML = `
+    <button onclick="changeMonth(-1)">◀</button>
+    <span>Month ${currentMonthOffset + 1} of ${total}</span>
+    <button onclick="changeMonth(1)">▶</button>
+  `;
+}
+
+function changeMonth(delta) {
+  const months = [...new Set(apiData.default.projections.map(d => d.date.substring(0, 7)))].sort();
+  const total = months.length;
+  currentMonthOffset = Math.max(0, Math.min(total - 1, currentMonthOffset + delta));
+  renderMonthNav();
+  renderCalendar();
+}
+
+// =========================================================================
+// Render Calendar (Dual Projection)
+// =========================================================================
+function renderCalendar() {
+  if (!apiData) {
+    document.getElementById('calendarContainer').innerHTML = '<div class="loading">No data</div>';
+    return;
+  }
+
+  const defProjs = apiData.default.projections;
+  const adjProjs = apiData.adjusted.projections;
+
+  // Build lookup maps
+  const defMap = {};
+  defProjs.forEach(d => { defMap[d.date] = d; });
+  const adjMap = {};
+  adjProjs.forEach(d => { adjMap[d.date] = d; });
+
+  const months = [...new Set(defProjs.map(d => d.date.substring(0, 7)))].sort();
+  const targetMonth = months[currentMonthOffset];
+  if (!targetMonth) return;
+
+  const [year, month] = targetMonth.split('-').map(Number);
+  const firstDay = new Date(year, month - 1, 1).getDay();
+  const totalDays = new Date(year, month, 0).getDate();
+  const today = new Date().toISOString().split('T')[0];
+  const startDate = document.getElementById('startDate').value;
+
+  // Collect inputs in view so we know which dates have real PnL
+  const hasInput = {};
+  for (const d of defProjs) {
+    if (d.has_input) hasInput[d.date] = true;
+  }
+
+  let html = `<div class="month-container">
+    <div class="month-header">${MONTH_NAMES[month - 1]} ${year}</div>
+    <div style="display:flex;gap:12px;justify-content:center;margin-bottom:8px;font-size:0.7rem;color:var(--text-muted);">
+      <span>🔵 <span style="color:var(--accent);">Default (${apiData.target_daily_pct}%)</span></span>
+      <span>🟢 <span style="color:var(--green);">Adjusted</span></span>
+      <span>📝 <span style="color:var(--gold);">Real input</span></span>
+    </div>
+    <div class="calendar-grid">
+      <div class="day-header">Sun</div>
+      <div class="day-header">Mon</div>
+      <div class="day-header">Tue</div>
+      <div class="day-header">Wed</div>
+      <div class="day-header">Thu</div>
+      <div class="day-header">Fri</div>
+      <div class="day-header">Sat</div>`;
+
+  // Empty cells before first day
+  for (let i = 0; i < firstDay; i++) {
+    html += '<div class="day-cell empty"></div>';
+  }
+
+  for (let day = 1; day <= totalDays; day++) {
+    const dateStr = `${targetMonth}-${String(day).padStart(2, '0')}`;
+    const def = defMap[dateStr];
+    const adj = adjMap[dateStr];
+
+    let classes = 'day-cell';
+    if (dateStr === today) classes += ' today';
+    if (dateStr === startDate) classes += ' start-day';
+    if (hasInput[dateStr]) classes += ' has-input';
+
+    if (def && adj) {
+      const defVal = def.projected_capital;
+      const defPnl = def.daily_pnl;
+      const adjVal = adj.projected_capital;
+      const adjPnl = adj.daily_pnl;
+      const isInputted = hasInput[dateStr];
+
+      // Check if adjusted differs from default
+      const differs = Math.abs(defVal - adjVal) > 0.01;
+
+      // The daily_pnl shown in adjusted: if inputted, show the actual_pnl, else show the projected
+      const adjPnlDisplay = isInputted ? adjPnl : adjPnl;
+
+      html += `<div class="${classes}" onclick="openPnlInput('${dateStr}')" title="Click to input real PnL for ${dateStr}">
+        <span class="day-num">${day}${isInputted ? ' 📝' : ''}</span>
+        <span class="projected-value" style="color:var(--accent);font-size:0.78rem;opacity:0.85;">${formatMoneyShort(defVal)} ${defPnl >= 0 ? '+' : ''}${formatMoneyShort(defPnl)}</span>
+        <span class="projected-value" style="color:var(--green);font-size:0.82rem;${differs ? '' : 'opacity:0.5;'}">${formatMoneyShort(adjVal)} ${adjPnl >= 0 ? '+' : ''}${formatMoneyShort(adjPnl)}</span>
+      </div>`;
+    } else if (def) {
+      // Only default available (shouldn't happen)
+      const defVal = def.projected_capital;
+      const defPnl = def.daily_pnl;
+      html += `<div class="${classes}" onclick="openPnlInput('${dateStr}')">
+        <span class="day-num">${day}</span>
+        <span class="projected-value" style="color:var(--accent);font-size:0.78rem;">${formatMoneyShort(defVal)}</span>
+      </div>`;
+    } else {
+      html += `<div class="${classes}">
+        <span class="day-num">${day}</span>
+        <span class="projected-value" style="color:var(--text-muted);font-size:0.7rem;">—</span>
+      </div>`;
+    }
+  }
+
+  html += '</div></div>';
+  document.getElementById('calendarContainer').innerHTML = html;
+}
+
+// =========================================================================
+// PnL Input: Open Modal
+// =========================================================================
+async function openPnlInput(dateStr) {
+  pnlEditDate = dateStr;
+
+  // Format the date nicely
+  const d = new Date(dateStr + 'T00:00:00');
+  const formatted = d.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+  document.getElementById('pnlModalDate').textContent = `📅 ${formatted}`;
+
+  // Check if there's already an input for this date
+  try {
+    const resp = await fetch('/api/projections/inputs');
+    const data = await resp.json();
+    const existing = data.inputs.find(i => i.date === dateStr);
+    if (existing) {
+      document.getElementById('pnlInput').value = existing.actual_pnl;
+      document.getElementById('pnlNotes').value = existing.notes || '';
+      document.getElementById('pnlDeleteBtn').style.display = 'inline-block';
+    } else {
+      document.getElementById('pnlInput').value = '';
+      document.getElementById('pnlNotes').value = '';
+      document.getElementById('pnlDeleteBtn').style.display = 'none';
+    }
+  } catch {
+    document.getElementById('pnlInput').value = '';
+    document.getElementById('pnlNotes').value = '';
+    document.getElementById('pnlDeleteBtn').style.display = 'none';
+  }
+
+  document.getElementById('pnlModal').classList.add('active');
+  setTimeout(() => document.getElementById('pnlInput').focus(), 100);
+}
+
+// =========================================================================
+// PnL Input: Save
+// =========================================================================
+async function savePnlInput() {
+  if (!pnlEditDate) return;
+  const pnl = parseFloat(document.getElementById('pnlInput').value);
+  if (isNaN(pnl)) { alert('Enter a valid PnL value'); return; }
+  const notes = document.getElementById('pnlNotes').value.trim();
+
+  try {
+    const resp = await fetch('/api/projections/input', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: pnlEditDate, actual_pnl: pnl, notes }),
+    });
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+    closeModal('pnlModal');
+    // Recalculate with fresh inputs
+    await calculate();
+  } catch (err) {
+    alert(`Save failed: ${err.message}`);
+  }
+}
+
+// =========================================================================
+// PnL Input: Delete
+// =========================================================================
+async function deletePnlInput() {
+  if (!pnlEditDate) return;
+  if (!confirm(`Delete PnL input for ${pnlEditDate}?`)) return;
+
+  try {
+    const resp = await fetch(`/api/projections/input/${pnlEditDate}`, { method: 'DELETE' });
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+    closeModal('pnlModal');
+    await calculate();
+  } catch (err) {
+    alert(`Delete failed: ${err.message}`);
+  }
+}
+
+// =========================================================================
+// Save / Load Profiles
+// =========================================================================
+async function showSaveModal() {
+  document.getElementById('profileName').value = '';
+  document.getElementById('profileDesc').value = '';
+  document.getElementById('saveModal').classList.add('active');
+}
+
+function closeModal(id) {
+  document.getElementById(id).classList.remove('active');
+}
+
+async function saveProfile() {
+  const name = document.getElementById('profileName').value.trim();
+  if (!name) { alert('Enter a profile name'); return; }
+  const desc = document.getElementById('profileDesc').value.trim();
+
+  const config = {
+    start_date: document.getElementById('startDate').value,
+    capital: parseFloat(document.getElementById('startCapital').value) || 30,
+    target_pct: parseFloat(document.getElementById('dailyTarget').value) || 5,
+    duration_months: parseInt(document.getElementById('duration').value) || 12,
+  };
+
+  try {
+    const resp = await fetch('/api/projections/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, description: desc, config })
+    });
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+    closeModal('saveModal');
+    alert(`Profile "${name}" saved!`);
+  } catch (err) {
+    alert(`Save failed: ${err.message}`);
+  }
+}
+
+async function showLoadModal() {
+  try {
+    const resp = await fetch('/api/projections/profiles');
+    const data = await resp.json();
+    const list = document.getElementById('profileList');
+
+    if (!data.profiles || data.profiles.length === 0) {
+      list.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:20px;">No saved profiles yet.</div>';
+    } else {
+      list.innerHTML = data.profiles.map(p => `
+        <div class="profile-item" onclick="loadProfile(${p.id})">
+          <div>
+            <div class="name">${p.name}</div>
+            <div class="desc">${p.description || `${p.config?.start_date || '?'} · $${p.config?.capital || '?'} · ${p.config?.target_pct || '?'}% daily`}</div>
+          </div>
+          <button class="del-btn" onclick="event.stopPropagation(); deleteProfile(${p.id})">✕</button>
+        </div>
+      `).join('');
+    }
+    document.getElementById('loadModal').classList.add('active');
+  } catch (err) {
+    alert(`Load failed: ${err.message}`);
+  }
+}
+
+async function loadProfile(id) {
+  try {
+    const resp = await fetch(`/api/projections/profile/${id}`);
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+
+    const cfg = data.profile.config;
+    document.getElementById('startDate').value = cfg.start_date || '2026-07-17';
+    document.getElementById('startCapital').value = cfg.capital || 30;
+    document.getElementById('dailyTarget').value = cfg.target_pct || 5;
+    document.getElementById('duration').value = cfg.duration_months || 12;
+
+    closeModal('loadModal');
+    calculate();
+  } catch (err) {
+    alert(`Load failed: ${err.message}`);
+  }
+}
+
+async function deleteProfile(id) {
+  if (!confirm('Delete this profile?')) return;
+  try {
+    await fetch(`/api/projections/profile/${id}`, { method: 'DELETE' });
+    showLoadModal();
+  } catch (err) {
+    alert(`Delete failed: ${err.message}`);
+  }
+}
+</script>
+</body>
+</html>

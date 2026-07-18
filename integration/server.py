@@ -34,6 +34,7 @@ from integration.version_control import VersionController
 from integration.winrate_db import WinrateDB
 from integration.rollback import RollbackManager
 from integration.coordinator import Coordinator
+from integration.projection_db import ProjectionDB
 
 logger = get_logger("integration.server")
 
@@ -128,6 +129,7 @@ class IntegrationServer:
         self._winrate_db = WinrateDB()
         self._rollback = RollbackManager()
         self._coordinator = Coordinator()
+        self._projection_db = ProjectionDB()
 
         # HTTP server
         self._app: Optional[web.Application] = None
@@ -158,6 +160,7 @@ class IntegrationServer:
             # 1. Initialise sub-systems
             await self._winrate_db.initialize()
             await self._rollback.initialize()
+            await self._projection_db.initialize()
             await self._coordinator.start()
             self._proxy_session = aiohttp.ClientSession()
             self._log.info("Sub-systems initialised")
@@ -194,6 +197,9 @@ class IntegrationServer:
 
         # Stop coordinator
         await self._coordinator.stop()
+
+        # Close projection DB
+        await self._projection_db.close()
 
         # Close proxy session
         if self._proxy_session:
@@ -240,6 +246,15 @@ class IntegrationServer:
         self._app.router.add_get("/api/shadow-analysis", self._handle_proxy_shadow_analysis)
         self._app.router.add_get("/api/opportunities", self._handle_proxy_opportunities)
         self._app.router.add_get("/architecture", self._handle_architecture)
+        self._app.router.add_get("/projections", self._handle_projections_page)
+        self._app.router.add_get("/api/projections/calculate", self._handle_projections_calculate)
+        self._app.router.add_post("/api/projections/profile", self._handle_projections_save)
+        self._app.router.add_get("/api/projections/profiles", self._handle_projections_list)
+        self._app.router.add_get("/api/projections/profile/{profile_id}", self._handle_projections_get)
+        self._app.router.add_delete("/api/projections/profile/{profile_id}", self._handle_projections_delete)
+        self._app.router.add_put("/api/projections/input", self._handle_projections_input_save)
+        self._app.router.add_delete("/api/projections/input/{input_date}", self._handle_projections_input_delete)
+        self._app.router.add_get("/api/projections/inputs", self._handle_projections_inputs_list)
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -832,6 +847,335 @@ class IntegrationServer:
             return web.Response(text=html, content_type="text/html")
         except FileNotFoundError:
             return web.Response(text="<h1>Architecture page not found</h1>", content_type="text/html", status=404)
+
+    # ------------------------------------------------------------------
+    # Handlers: Projections (Capital Projection Calendar)
+    # ------------------------------------------------------------------
+
+    async def _handle_projections_page(self, request: web.Request) -> web.Response:
+        """GET /projections — serve the capital projection calendar page."""
+        import os
+        html_path = os.path.join(os.path.dirname(__file__), "projections.html")
+        try:
+            with open(html_path) as f:
+                html = f.read()
+            return web.Response(
+                text=html,
+                content_type="text/html",
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                },
+            )
+        except FileNotFoundError:
+            return web.Response(
+                text="<h1>Projections page not found</h1>",
+                content_type="text/html",
+                status=404,
+            )
+
+    async def _handle_projections_calculate(self, request: web.Request) -> web.Response:
+        """GET /api/projections/calculate — compute capital projection.
+
+        Query params:
+            start_date (str, required): YYYY-MM-DD
+            capital (float, default 30): starting capital
+            target_pct (float, default 5): daily target %
+            duration_months (int, default 12): projection duration in months
+
+        Returns both default (config-based) and adjusted (real-input-aware) projections.
+        """
+        from datetime import datetime, timedelta, timezone
+        import calendar
+        import statistics
+
+        try:
+            start_str = request.query.get("start_date", "")
+            if not start_str:
+                return web.json_response({"error": "start_date is required"}, status=400)
+
+            start_date = datetime.strptime(start_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            capital = float(request.query.get("capital", "30"))
+            target_pct = float(request.query.get("target_pct", "5"))
+            duration_months = int(request.query.get("duration_months", "12"))
+
+            if capital <= 0:
+                return web.json_response({"error": "capital must be positive"}, status=400)
+            if target_pct <= 0:
+                return web.json_response({"error": "target_pct must be positive"}, status=400)
+            if duration_months < 1 or duration_months > 120:
+                return web.json_response({"error": "duration_months must be 1-120"}, status=400)
+
+            # Calculate end date
+            end_month = start_date.month + duration_months
+            end_year = start_date.year + (end_month - 1) // 12
+            end_month = ((end_month - 1) % 12) + 1
+            last_day = calendar.monthrange(end_year, end_month)[1]
+            end_date = start_date.replace(year=end_year, month=end_month, day=min(start_date.day, last_day))
+            total_days = (end_date - start_date).days
+
+            # Fetch real PnL inputs in range
+            inputs = await self._projection_db.get_inputs_in_range(
+                start_str, end_date.strftime("%Y-%m-%d")
+            )
+            inputs_map = {inp["date"]: inp["actual_pnl"] for inp in inputs}
+
+            multiplier = 1.0 + (target_pct / 100.0)
+
+            # ------------------------------------------------------------------
+            # 1. Default projection (pure config-based)
+            # ------------------------------------------------------------------
+            default_projections = []
+            for day_count in range(total_days + 1):
+                current = start_date + timedelta(days=day_count)
+                day_start_capital = capital * (multiplier ** day_count)
+                daily_pnl = day_start_capital * (target_pct / 100.0)
+                cumulative_pct = ((day_start_capital / capital) - 1) * 100 if day_count > 0 else 0.0
+                default_projections.append({
+                    "date": current.strftime("%Y-%m-%d"),
+                    "day_of_week": current.strftime("%A"),
+                    "day_num": current.day,
+                    "projected_capital": round(day_start_capital, 2),
+                    "daily_pnl": round(daily_pnl, 2),
+                    "cumulative_gain_pct": round(cumulative_pct, 4),
+                    "has_input": current.strftime("%Y-%m-%d") in inputs_map,
+                })
+
+            default_ending = capital * (multiplier ** (total_days + 1))
+
+            # ------------------------------------------------------------------
+            # 2. Adjusted projection (real-input-aware with adaptive rate)
+            # ------------------------------------------------------------------
+            adjusted_projections = []
+            actual_return_rates = []  # rolling list of actual daily return rates
+            prev_actual_capital = capital
+
+            for day_count in range(total_days + 1):
+                current = start_date + timedelta(days=day_count)
+                date_str = current.strftime("%Y-%m-%d")
+                adaptive_rate = target_pct  # default fallback
+
+                if date_str in inputs_map:
+                    # Use the real PnL input
+                    actual_pnl = inputs_map[date_str]
+                    day_start_capital = prev_actual_capital
+                    daily_pnl = actual_pnl
+                    # Calculate the actual return rate for this date
+                    if prev_actual_capital > 0:
+                        actual_rate = (actual_pnl / prev_actual_capital) * 100.0
+                        actual_return_rates.append(actual_rate)
+                    # New capital starts next day
+                    new_capital = prev_actual_capital + actual_pnl
+                else:
+                    # Use adaptive rate (median of actual returns, fallback to target)
+                    if len(actual_return_rates) >= 2:
+                        adaptive_rate = statistics.median(actual_return_rates)
+                    else:
+                        adaptive_rate = target_pct
+
+                    day_start_capital = prev_actual_capital
+                    daily_pnl = day_start_capital * (adaptive_rate / 100.0)
+                    new_capital = prev_actual_capital + daily_pnl
+
+                cumulative_pct = ((day_start_capital / capital) - 1) * 100 if day_count > 0 else 0.0
+                adjusted_projections.append({
+                    "date": date_str,
+                    "day_of_week": current.strftime("%A"),
+                    "day_num": current.day,
+                    "projected_capital": round(day_start_capital, 2),
+                    "daily_pnl": round(daily_pnl, 2),
+                    "cumulative_gain_pct": round(cumulative_pct, 4),
+                    "has_input": date_str in inputs_map,
+                    "adaptive_rate": round(adaptive_rate, 4) if date_str not in inputs_map and day_count > 0 else None,
+                })
+
+                prev_actual_capital = new_capital
+
+            adjusted_ending = prev_actual_capital
+            adjusted_total_gain = adjusted_ending - capital
+            adjusted_gain_pct = ((adjusted_ending / capital) - 1) * 100 if capital > 0 else 0
+
+            default_ending_val = default_ending
+            default_total_gain = default_ending_val - capital
+            default_gain_pct = ((default_ending_val / capital) - 1) * 100 if capital > 0 else 0
+
+            # Build adaptive rate info
+            adaptive_rate_info = {
+                "configured_target": target_pct,
+                "actual_rates": [round(r, 4) for r in actual_return_rates],
+                "median_rate": round(statistics.median(actual_return_rates), 4) if len(actual_return_rates) >= 2 else None,
+                "total_inputs": len(inputs),
+            }
+
+            return web.json_response({
+                "start_date": start_str,
+                "end_date": end_date.strftime("%Y-%m-%d"),
+                "starting_capital": capital,
+                "target_daily_pct": target_pct,
+                "duration_days": total_days,
+                "duration_months": duration_months,
+                "adaptive_rate": adaptive_rate_info,
+                # Default (config-based)
+                "default": {
+                    "ending_capital": round(default_ending_val, 2),
+                    "total_gain": round(default_total_gain, 2),
+                    "gain_pct": round(default_gain_pct, 4),
+                    "projections": default_projections,
+                },
+                # Adjusted (real-input-aware)
+                "adjusted": {
+                    "ending_capital": round(adjusted_ending, 2),
+                    "total_gain": round(adjusted_total_gain, 2),
+                    "gain_pct": round(adjusted_gain_pct, 4),
+                    "adaptive_rate_used": adaptive_rate_info["median_rate"] or target_pct,
+                    "projections": adjusted_projections,
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        except Exception as exc:
+            self._log.error(f"Projection calculation failed: {exc}", exc_info=True)
+            return web.json_response({"error": "Calculation failed", "detail": str(exc)}, status=500)
+
+    async def _handle_projections_save(self, request: web.Request) -> web.Response:
+        """POST /api/projections/profile — save a projection profile.
+
+        Body:
+            {"name": "my profile", "description": "...", "config": {...}}
+        """
+        try:
+            body = await request.json()
+            name = body.get("name", "").strip()
+            if not name:
+                return web.json_response({"error": "name is required"}, status=400)
+
+            config = body.get("config", {})
+            if not config:
+                return web.json_response({"error": "config is required"}, status=400)
+
+            description = body.get("description", "")
+
+            try:
+                profile_id = await self._projection_db.save_profile(name, config, description)
+                return web.json_response({
+                    "status": "saved",
+                    "id": profile_id,
+                    "name": name,
+                }, status=201)
+            except ValueError as exc:
+                return web.json_response({"error": str(exc)}, status=409)
+
+        except Exception as exc:
+            self._log.error(f"Save projection profile failed: {exc}")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _handle_projections_list(self, request: web.Request) -> web.Response:
+        """GET /api/projections/profiles — list saved projection profiles."""
+        try:
+            profiles = await self._projection_db.list_profiles()
+            return web.json_response({
+                "profiles": profiles,
+                "count": len(profiles),
+            })
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _handle_projections_get(self, request: web.Request) -> web.Response:
+        """GET /api/projections/profile/{profile_id} — get a single profile."""
+        try:
+            profile_id = int(request.match_info.get("profile_id", "0"))
+            profile = await self._projection_db.get_profile(profile_id)
+            if profile is None:
+                return web.json_response({"error": "Profile not found"}, status=404)
+            return web.json_response({"profile": profile})
+        except ValueError:
+            return web.json_response({"error": "Invalid profile ID"}, status=400)
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _handle_projections_delete(self, request: web.Request) -> web.Response:
+        """DELETE /api/projections/profile/{profile_id} — delete a profile."""
+        try:
+            profile_id = int(request.match_info.get("profile_id", "0"))
+            deleted = await self._projection_db.delete_profile(profile_id)
+            if not deleted:
+                return web.json_response({"error": "Profile not found"}, status=404)
+            return web.json_response({"status": "deleted", "id": profile_id})
+        except ValueError:
+            return web.json_response({"error": "Invalid profile ID"}, status=400)
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+    # ------------------------------------------------------------------
+    # Handlers: Projection Real PnL Inputs
+    # ------------------------------------------------------------------
+
+    async def _handle_projections_input_save(self, request: web.Request) -> web.Response:
+        """PUT /api/projections/input — save or update a real PnL input.
+
+        Body:
+            {"date": "2026-07-17", "actual_pnl": 1.50, "notes": "good day"}
+        """
+        try:
+            body = await request.json()
+            date = body.get("date", "")
+            actual_pnl = body.get("actual_pnl")
+            notes = body.get("notes", "")
+
+            if not date:
+                return web.json_response({"error": "date is required"}, status=400)
+            if actual_pnl is None:
+                return web.json_response({"error": "actual_pnl is required"}, status=400)
+
+            from datetime import datetime
+            datetime.strptime(date, "%Y-%m-%d")  # validate date format
+
+            record = await self._projection_db.save_input(
+                date, float(actual_pnl), notes
+            )
+            return web.json_response({
+                "status": "saved",
+                "input": record,
+            })
+
+        except ValueError as exc:
+            return web.json_response({"error": f"Invalid date format: {exc}"}, status=400)
+        except Exception as exc:
+            self._log.error(f"Save input failed: {exc}")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _handle_projections_input_delete(self, request: web.Request) -> web.Response:
+        """DELETE /api/projections/input/{input_date} — delete a real PnL input.
+
+        URL path: input_date is YYYY-MM-DD
+        """
+        try:
+            date = request.match_info.get("input_date", "")
+            if not date:
+                return web.json_response({"error": "Date is required"}, status=400)
+
+            deleted = await self._projection_db.delete_input(date)
+            if not deleted:
+                return web.json_response({"error": f"No input found for {date}"}, status=404)
+
+            return web.json_response({"status": "deleted", "date": date})
+
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _handle_projections_inputs_list(self, request: web.Request) -> web.Response:
+        """GET /api/projections/inputs — list all real PnL inputs."""
+        try:
+            inputs = await self._projection_db.get_all_inputs()
+            return web.json_response({
+                "inputs": inputs,
+                "count": len(inputs),
+            })
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
 
     async def _handle_dashboard(self, request: web.Request) -> web.Response:
         """GET /dashboard — aggregated dashboard view of the entire system.
