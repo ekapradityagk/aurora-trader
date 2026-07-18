@@ -26,6 +26,11 @@ async def learning_main():
     while server._running:
         await asyncio.sleep(1)
 
+async def wallet_main():
+    """Start wallet scanner on port 8902."""
+    from wallet_scanner.scanner import run_scanner
+    await run_scanner(host="0.0.0.0", port=8902)
+
 async def main():
     from trading_server.server import main as trading_main
     from integration.server import main as integration_main
@@ -54,12 +59,14 @@ async def main():
     print("   Learning Server  → http://0.0.0.0:8901")
     print("   Trading Server   → http://0.0.0.0:8900")
     print("   Integration      → http://0.0.0.0:8903")
+    print("   Wallet Scanner   → http://0.0.0.0:8902")
     print("   Dashboard        → http://0.0.0.0:8903/dashboard")
     
     await asyncio.gather(
         learning_main(),
         trading_main(),
-        integration_main()
+        integration_main(),
+        wallet_main()
     )
 
 if __name__ == "__main__":

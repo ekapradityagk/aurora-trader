@@ -431,10 +431,14 @@ class HyperoptOptimizer:
             pnl_list = _simulate_trades(train_trades, params)
             return _sharpe_ratio(pnl_list)
 
+        optuna_cfg = self._cfg.optuna_config
+        storage_url = optuna_cfg.get("storage")  # None → in-memory (safe fallback)
         study = optuna.create_study(
-            direction="maximize",
+            direction=optuna_cfg.get("direction", "maximize"),
             sampler=optuna.samplers.TPESampler(seed=42),
             study_name="aurora_hyperopt",
+            storage=storage_url,
+            load_if_exists=True,
         )
 
         self._log.info(

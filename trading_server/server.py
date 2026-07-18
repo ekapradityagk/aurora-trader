@@ -914,10 +914,7 @@ class TradingServer:
                                     self._trailing_events.append(event)
                                     if len(self._trailing_events) > self._max_trailing_events:
                                         self._trailing_events.pop(0)
-                                    # Fire Discord webhook
-                                    asyncio.ensure_future(
-                                        self._send_discord_webhook(event)
-                                    )
+                                    # Cron-based Discord notification (handled externally)
                             elif action == "break_even":
                                 self._log.info(
                                     f"{symbol} | Break-even activated: "

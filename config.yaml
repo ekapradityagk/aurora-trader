@@ -132,7 +132,7 @@ risk_management:
     evaluation_window: 20
     max_versions_to_keep: 10
 wallet_scanner:
-  enabled: false
+  enabled: true
   api_base_url: http://127.0.0.1:8902
   poll_interval_seconds: 60
   endpoints:
