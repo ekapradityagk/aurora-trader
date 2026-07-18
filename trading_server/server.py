@@ -953,6 +953,7 @@ class TradingServer:
     async def _update_positions_loop(self) -> None:
         """Periodically check and update open positions."""
         exchange_sync_counter = 0
+        balance_sync_counter = 0
         while self._running:
             try:
                 # Full exchange sync every ~5 minutes (10 × 30s)
@@ -960,6 +961,12 @@ class TradingServer:
                 if exchange_sync_counter >= 10:
                     exchange_sync_counter = 0
                     await self._verify_positions_with_exchange()
+
+                # Balance sync from Binance every ~2 minutes (4 × 30s)
+                balance_sync_counter += 1
+                if balance_sync_counter >= 4:
+                    balance_sync_counter = 0
+                    await self._update_balance()
 
                 await self._update_positions()
                 await asyncio.sleep(30)  # check every 30 seconds
