@@ -517,7 +517,10 @@ class TradingServer:
 
     async def _run_strategy_checks(self, symbol: str) -> None:
         """Run all enabled strategies on a symbol after a 1h close."""
-        # 1. Check circuit breaker
+        # 1. Check circuit breaker — per-symbol first, then global
+        if await self._circuit_breaker.is_symbol_paused(symbol):
+            self._log.debug(f"{symbol} | Per-symbol circuit breaker active — skipping")
+            return
         if await self._circuit_breaker.is_paused():
             self._log.debug(
                 f"{symbol} | Circuit breaker paused — skipping strategies"
@@ -1452,13 +1455,18 @@ class TradingServer:
 
         # === Safety gates ===
 
-        # 1. Circuit breaker
+        # 1. Circuit breaker — per-symbol first, global for catastrophic scenarios
         if self._circuit_breaker:
-            cb_state = await self._circuit_breaker.get_state()
-            if cb_state.get("is_paused"):
+            if await self._circuit_breaker.is_symbol_paused(symbol):
                 return web.json_response(
-                    {"error": "Circuit breaker is active — trading paused",
-                     "detail": cb_state.get("reason", "")},
+                    {"error": f"{symbol} is paused for the day — daily loss limit reached",
+                     "detail": "Per-symbol circuit breaker active"},
+                    status=403,
+                )
+            if await self._circuit_breaker.is_paused():
+                return web.json_response(
+                    {"error": "Circuit breaker is active — max drawdown breached",
+                     "detail": ""},
                     status=403,
                 )
 

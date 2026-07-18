@@ -48,6 +48,14 @@ CREATE TABLE IF NOT EXISTS daily_pnl_log (
     reason TEXT DEFAULT '',
     timestamp TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS paused_symbols (
+    symbol TEXT NOT NULL,
+    date TEXT NOT NULL,
+    reason TEXT DEFAULT '',
+    paused_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, date)
+);
 """
 
 
@@ -85,6 +93,11 @@ class CircuitBreaker:
             risk_global.get("daily_loss_limit_pct", 5.0)
         )
         self._loss_limit_pct = configured_limit if configured_limit > 0 else loss_limit_pct
+
+        # Max open positions (for per-symbol loss limit calculation)
+        self._max_open_positions = int(
+            risk_global.get("max_open_positions", 6)
+        )
 
         self._log = logger
         self._conn: Optional[aiosqlite.Connection] = None
@@ -158,18 +171,112 @@ class CircuitBreaker:
         """, (float(pnl), now, today))
         await self._conn.commit()
 
-        # Check if we need to pause
+        # Check per-symbol loss limit — pause just this symbol
+        await self._check_symbol_loss(symbol, pnl, today, now)
+
+        # Check if we need to pause globally (catastrophic loss only)
         state = await self.get_state()
-        if state["loss_pct"] >= self._loss_limit_pct and not state["is_paused"]:
+        # Global pause at -15% max drawdown (keeps account from blowing up)
+        if state["loss_pct"] >= 15.0 and not state["is_paused"]:
             await self._pause()
             self._log.critical(
-                f"DAILY LOSS LIMIT BREACHED: "
+                f"MAX DRAWDOWN BREACHED: "
                 f"PnL={state['current_pnl']:.2f} "
-                f"({state['loss_pct']:.2f}% ≥ {self._loss_limit_pct}%). "
-                f"Trading PAUSED until UTC midnight."
+                f"({state['loss_pct']:.2f}% ≥ 15%). "
+                f"ALL TRADING PAUSED until UTC midnight."
             )
 
         return state
+
+    async def _check_symbol_loss(
+        self,
+        symbol: str,
+        pnl: Decimal,
+        today: str,
+        now: str,
+    ) -> None:
+        """Check if a specific symbol breached its daily loss limit and pause it."""
+        try:
+            # Get per-symbol accumulated PnL for today
+            cursor = await self._conn.execute(
+                "SELECT COALESCE(SUM(pnl), 0.0) AS total FROM daily_pnl_log "
+                "WHERE date = ? AND symbol = ?",
+                (today, symbol),
+            )
+            row = await cursor.fetchone()
+            symbol_pnl = float(row["total"]) if row else float(pnl)
+
+            state = await self.get_state()
+            sb = state["starting_balance"]
+            if sb <= 0:
+                return
+
+            # Per-symbol limit = loss_limit_pct / max positions
+            per_symbol_limit = self._loss_limit_pct / float(self._max_open_positions)
+            symbol_loss_pct = (abs(symbol_pnl) / sb * 100) if symbol_pnl < 0 else 0.0
+
+            if symbol_loss_pct >= per_symbol_limit:
+                # Check if already paused
+                c = await self._conn.execute(
+                    "SELECT 1 FROM paused_symbols WHERE symbol = ? AND date = ?",
+                    (symbol, today),
+                )
+                already = await c.fetchone()
+                if not already:
+                    await self._conn.execute(
+                        "INSERT INTO paused_symbols (symbol, date, reason, paused_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (symbol, today,
+                         f"Daily loss {symbol_loss_pct:.2f}% ≥ {per_symbol_limit:.2f}% limit",
+                         now),
+                    )
+                    await self._conn.commit()
+                    self._log.info(
+                        f"{symbol} | Paused for the day: "
+                        f"PnL={symbol_pnl:.2f} ({symbol_loss_pct:.2f}%) "
+                        f"≥ {per_symbol_limit:.2f}% per-symbol limit"
+                    )
+        except Exception as exc:
+            self._log.debug(f"Symbol loss check failed for {symbol}: {exc}")
+
+    async def is_symbol_paused(self, symbol: str) -> bool:
+        """Return True if this specific symbol is paused for the day."""
+        if not self._conn:
+            return False
+        try:
+            today = self._utc_date()
+            c = await self._conn.execute(
+                "SELECT 1 FROM paused_symbols WHERE symbol = ? AND date = ?",
+                (symbol, today),
+            )
+            return await c.fetchone() is not None
+        except Exception:
+            return False
+
+    async def unpause_symbol(self, symbol: str) -> None:
+        """Remove a symbol from the paused list (e.g. at UTC reset)."""
+        if not self._conn:
+            return
+        today = self._utc_date()
+        await self._conn.execute(
+            "DELETE FROM paused_symbols WHERE symbol = ? AND date = ?",
+            (symbol, today),
+        )
+        await self._conn.commit()
+
+    async def get_paused_symbols(self) -> list[str]:
+        """Return list of symbols paused for the current day."""
+        if not self._conn:
+            return []
+        try:
+            today = self._utc_date()
+            c = await self._conn.execute(
+                "SELECT symbol FROM paused_symbols WHERE date = ?",
+                (today,),
+            )
+            return [row["symbol"] for row in await c.fetchall()]
+        except Exception:
+            return []
 
     async def get_state(self) -> Dict[str, Any]:
         """Get the current circuit breaker state.
@@ -267,6 +374,8 @@ class CircuitBreaker:
                 updated_at = ?
             WHERE id = 1
         """, (new_date, new_sb, now))
+        # Clear any per-symbol pauses from the previous day
+        await self._conn.execute("DELETE FROM paused_symbols")
         await self._conn.commit()
 
         self._log.info(
