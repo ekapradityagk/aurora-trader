@@ -840,14 +840,85 @@ class TradingServer:
         else:
             self._log.info("No existing positions found on exchange (clean start)")
 
+    async def _verify_positions_with_exchange(self) -> None:
+        """Cross-check all tracked positions against Binance's actual open positions.
+
+        If a position exists in self._positions but NOT on Binance (positionAmt == 0),
+        it means the exchange already closed it — via SL/TP order, manual close,
+        liquidation, or any other external action. We close it locally to keep state
+        consistent.
+        """
+        if not self._rest:
+            return
+
+        try:
+            exchange_positions = await self._rest.get_open_positions()
+        except Exception as exc:
+            self._log.warning(f"Exchange sync failed (will retry): {exc}")
+            return
+
+        # Build set of symbols that Binance says are still open
+        exchange_open_symbols = set()
+        for ep in exchange_positions:
+            sym = ep.get("symbol", "")
+            amt = Decimal(ep.get("positionAmt", "0"))
+            if sym and amt != 0:
+                exchange_open_symbols.add(sym)
+
+        # Check each tracked position — if Binance no longer has it, close locally
+        closed_count = 0
+        for symbol, position in list(self._positions.items()):
+            if not position.is_open:
+                continue
+            if symbol not in exchange_open_symbols:
+                # Binance already closed this position
+                position.exit_price = position.current_price or position.entry_price
+                position.exit_time = datetime.now(timezone.utc)
+                position.exit_reason = "exchange_closed"
+                position.realized_pnl = position.unrealized_pnl or Decimal("0")
+                position.status = PositionStatus.CLOSED
+                self._log.info(
+                    f"{symbol} | Detected exchange-close: position no longer on Binance "
+                    f"(PnL={float(position.realized_pnl):+.2f})"
+                )
+                # Record in circuit breaker
+                await self._circuit_breaker.record_trade_pnl(
+                    symbol=symbol,
+                    pnl=position.realized_pnl,
+                    reason="exchange_closed",
+                )
+                self._log.trade(
+                    "CLOSE",
+                    symbol=symbol,
+                    side=position.side.value.upper(),
+                    entry=str(position.entry_price),
+                    exit=str(position.exit_price),
+                    pnl=str(position.realized_pnl),
+                    reason="exchange_closed",
+                )
+                closed_count += 1
+
+        if closed_count:
+            self._log.info(
+                f"✓ Synced: {closed_count} position(s) closed on exchange "
+                f"have been removed from local tracking"
+            )
+
     # ------------------------------------------------------------------
     # Position Management Loop
     # ------------------------------------------------------------------
 
     async def _update_positions_loop(self) -> None:
         """Periodically check and update open positions."""
+        exchange_sync_counter = 0
         while self._running:
             try:
+                # Full exchange sync every ~5 minutes (10 × 30s)
+                exchange_sync_counter += 1
+                if exchange_sync_counter >= 10:
+                    exchange_sync_counter = 0
+                    await self._verify_positions_with_exchange()
+
                 await self._update_positions()
                 await asyncio.sleep(30)  # check every 30 seconds
             except asyncio.CancelledError:
