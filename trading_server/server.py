@@ -1420,9 +1420,22 @@ class TradingServer:
         # 4. Check if already in a position for this symbol
         existing = self._positions.get(symbol)
         if existing and existing.is_open:
-            return web.json_response(
-                {"error": f"Already have an open position for {symbol}"}, status=409
+            # Same direction? → reject (already in this trade)
+            is_long = direction == "LONG"
+            existing_is_long = existing.side == OrderSide.BUY
+            if is_long == existing_is_long:
+                return web.json_response(
+                    {"error": f"Already have a {direction} position for {symbol}"},
+                    status=409,
+                )
+            # Opposite direction → close existing position first (flip)
+            self._log.info(
+                f"{symbol} | Flipping: closing existing "
+                f"{existing.side.value.upper()} to open {direction} "
+                f"(confidence={confidence})"
             )
+            await self._close_position(symbol, f"flip_to_{direction.lower()}")
+            # Position is now closed locally — proceed to open the new one
 
         # === Calculate position size ===
         balance = float(self._account_balance)
