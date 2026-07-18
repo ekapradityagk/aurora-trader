@@ -129,6 +129,10 @@ class TradingServer:
         self._trailing_events: List[Dict[str, Any]] = []
         self._max_trailing_events = 50
 
+        # Closed trades history (ring buffer for dashboard)
+        self._closed_trades: List[Dict[str, Any]] = []
+        self._max_closed_trades = 100
+
         # --- Concurrency ---
         self._lock = asyncio.Lock()
 
@@ -887,6 +891,18 @@ class TradingServer:
                     pnl=position.realized_pnl,
                     reason="exchange_closed",
                 )
+
+                # Record in closed trades ring buffer for dashboard
+                side_str = "SELL" if position.side == OrderSide.BUY else "BUY"
+                self._record_closed_trade(
+                    symbol=symbol,
+                    side=side_str,
+                    entry_price=position.entry_price,
+                    exit_price=position.exit_price or position.current_price or position.entry_price,
+                    pnl=position.realized_pnl or Decimal("0"),
+                    reason="exchange_closed",
+                    leverage=position.leverage,
+                )
                 self._log.trade(
                     "CLOSE",
                     symbol=symbol,
@@ -903,6 +919,32 @@ class TradingServer:
                 f"✓ Synced: {closed_count} position(s) closed on exchange "
                 f"have been removed from local tracking"
             )
+
+    def _record_closed_trade(
+        self,
+        symbol: str,
+        side: str,
+        entry_price: Decimal,
+        exit_price: Decimal,
+        pnl: Decimal,
+        reason: str,
+        leverage: int = 20,
+    ) -> None:
+        """Record a closed trade in the ring buffer for the dashboard /trades API."""
+        record = {
+            "symbol": symbol,
+            "side": side,
+            "entry_price": float(entry_price),
+            "exit_price": float(exit_price),
+            "pnl": float(pnl),
+            "reason": reason,
+            "leverage": leverage,
+            "activity_type": "futures_pnl",
+            "closed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._closed_trades.append(record)
+        if len(self._closed_trades) > self._max_closed_trades:
+            self._closed_trades.pop(0)
 
     # ------------------------------------------------------------------
     # Position Management Loop
@@ -1080,6 +1122,17 @@ class TradingServer:
                 reason=reason,
             )
 
+            # Record in closed trades ring buffer for dashboard
+            self._record_closed_trade(
+                symbol=symbol,
+                side=side_str,
+                entry_price=position.entry_price,
+                exit_price=exit_price,
+                pnl=pnl,
+                reason=reason,
+                leverage=position.leverage,
+            )
+
             self._log.info(
                 f"{symbol} | CLOSED {position.side.value.upper()} position: "
                 f"pnl={pnl:.2f}, reason={reason}, "
@@ -1235,6 +1288,7 @@ class TradingServer:
         self._app.router.add_post("/api/execute", self._handle_execute)
         self._app.router.add_post("/api/reload-symbols", self._handle_reload_symbols)
         self._app.router.add_get("/api/events/trailing", self._handle_trailing_events)
+        self._app.router.add_get("/api/closed-trades", self._handle_closed_trades)
 
         # Start
         self._runner = web.AppRunner(self._app)
@@ -1645,6 +1699,17 @@ class TradingServer:
             "count": len(events),
             "events": events[-20:],  # last 20 max
             "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+
+
+    async def _handle_closed_trades(self, request: web.Request) -> web.Response:
+        """GET /api/closed-trades — return recent closed trades with PnL."""
+        limit = int(request.query.get("limit", "50"))
+        limit = min(limit, 100)
+        trades = list(self._closed_trades)
+        return web.json_response({
+            "count": len(trades),
+            "trades": trades[-limit:],
         })
 
 

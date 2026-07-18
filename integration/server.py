@@ -231,6 +231,7 @@ class IntegrationServer:
         self._app.router.add_get("/api/trading/health", self._handle_proxy_health)
         self._app.router.add_get("/api/trading/positions", self._handle_proxy_positions)
         self._app.router.add_get("/api/trading/trailing-events", self._handle_proxy_trailing_events)
+        self._app.router.add_get("/api/trading/closed-trades", self._handle_proxy_closed_trades)
         self._app.router.add_get("/api/trading/signals", self._handle_proxy_signals)
         self._app.router.add_get("/api/dashboard", self._handle_dashboard)
         self._app.router.add_get("/api/pair-rankings", self._handle_proxy_pair_rankings)
@@ -688,10 +689,23 @@ class IntegrationServer:
         except Exception as exc:
             self._log.warning(f"Could not fetch Binance trades: {exc}")
 
-        # Merge: real Binance trades first, then local trades, deduped by ID
+        # 3. Fetch closed trades from trading server (exchange-closed, flip-closed, etc.)
+        trading_trades = []
+        try:
+            async with self._proxy_session.get(
+                "http://127.0.0.1:8900/api/closed-trades?limit=100",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    trading_trades = data.get("trades", [])
+        except Exception as exc:
+            self._log.debug(f"Could not fetch trading server closed trades: {exc}")
+
+        # Merge: real Binance trades first, then trading server, then local, deduped by ID
         seen = set()
         merged = []
-        for t in binance_trades + local_trades:
+        for t in binance_trades + trading_trades + local_trades:
             tid = t.get("trade_id", "")
             if tid not in seen:
                 seen.add(tid)
@@ -708,6 +722,7 @@ class IntegrationServer:
             {
                 "count": len(merged),
                 "binance_trades": len(binance_trades),
+                "trading_trades": len(trading_trades),
                 "local_trades": len(local_trades),
                 "version_filter": version_tag or "all",
                 "trades": merged,
@@ -759,6 +774,10 @@ class IntegrationServer:
     async def _handle_proxy_trailing_events(self, request: web.Request) -> web.Response:
         """GET /api/trading/trailing-events → trading server /api/events/trailing."""
         return await self._proxy_to_trading("/api/events/trailing", request)
+
+    async def _handle_proxy_closed_trades(self, request: web.Request) -> web.Response:
+        """GET /api/trading/closed-trades → trading server /api/closed-trades."""
+        return await self._proxy_to_trading("/api/closed-trades", request)
 
     async def _handle_proxy_signals(self, request: web.Request) -> web.Response:
         """GET /api/trading/signals → trading server /signals."""
