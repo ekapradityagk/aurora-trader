@@ -1299,6 +1299,15 @@ class TradingServer:
         self._app.router.add_post("/api/reload-symbols", self._handle_reload_symbols)
         self._app.router.add_get("/api/events/trailing", self._handle_trailing_events)
         self._app.router.add_get("/api/closed-trades", self._handle_closed_trades)
+        # Risk management API (for auto-execution by LLM cron)
+        self._app.router.add_get("/risk/state", self._handle_risk_state)
+        self._app.router.add_post("/api/risk/pause", self._handle_risk_pause)
+        self._app.router.add_post("/api/risk/unpause", self._handle_risk_unpause)
+        self._app.router.add_get("/api/risk/paused", self._handle_risk_paused)
+        # Config management API
+        self._app.router.add_post("/api/config/update", self._handle_config_update)
+        # Symbol management API
+        self._app.router.add_post("/api/symbols/update", self._handle_symbols_update)
 
         # Start
         self._runner = web.AppRunner(self._app)
@@ -1726,6 +1735,221 @@ class TradingServer:
             "count": len(trades),
             "trades": trades[-limit:],
         })
+
+    # ------------------------------------------------------------------
+    # Handlers: Risk Management API (for LLM auto-execution)
+    # ------------------------------------------------------------------
+
+    async def _handle_risk_state(self, request: web.Request) -> web.Response:
+        """GET /risk/state — get circuit breaker state and paused symbols."""
+        if not self._circuit_breaker:
+            return web.json_response({"error": "Circuit breaker not available"}, status=503)
+        try:
+            state = await self._circuit_breaker.get_state()
+            paused = await self._circuit_breaker.get_paused_symbols()
+            return web.json_response({
+                **state,
+                "paused_symbols": paused,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _handle_risk_pause(self, request: web.Request) -> web.Response:
+        """POST /api/risk/pause — pause a symbol in the circuit breaker.
+
+        Body: {"symbol": "TIAUSDT", "reason": "auto: 12 consecutive losses"}
+        """
+        if not self._circuit_breaker:
+            return web.json_response({"error": "Circuit breaker not available"}, status=503)
+        try:
+            body = await request.json()
+            symbol = body.get("symbol", "").upper()
+            if not symbol:
+                return web.json_response({"error": "symbol is required"}, status=400)
+            reason = body.get("reason", "manual_pause")
+
+            # Check if already paused
+            if await self._circuit_breaker.is_symbol_paused(symbol):
+                return web.json_response({
+                    "status": "already_paused",
+                    "symbol": symbol,
+                })
+
+            # Pause by recording a dummy PnL that triggers the per-symbol limit
+            from decimal import Decimal
+            await self._circuit_breaker.record_trade_pnl(
+                symbol=symbol,
+                pnl=Decimal("-999999"),
+                reason=reason,
+            )
+            self._log.info(f"{symbol} | AUTO-PAUSED by LLM analysis: {reason}")
+
+            # Also remove any open position for this symbol
+            if symbol in self._positions and self._positions[symbol].is_open:
+                pos = self._positions[symbol]
+                pos.status = PositionStatus.CLOSED
+                pos.close_price = pos.current_price or pos.entry_price
+                del self._positions[symbol]
+                self._log.info(f"{symbol} | Position auto-closed due to pause")
+
+            return web.json_response({
+                "status": "paused",
+                "symbol": symbol,
+                "reason": reason,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _handle_risk_unpause(self, request: web.Request) -> web.Response:
+        """POST /api/risk/unpause — unpause a symbol.
+
+        Body: {"symbol": "TIAUSDT"}
+        """
+        if not self._circuit_breaker:
+            return web.json_response({"error": "Circuit breaker not available"}, status=503)
+        try:
+            body = await request.json()
+            symbol = body.get("symbol", "").upper()
+            if not symbol:
+                return web.json_response({"error": "symbol is required"}, status=400)
+
+            await self._circuit_breaker.unpause_symbol(symbol)
+            self._log.info(f"{symbol} | AUTO-UNPAUSED by LLM analysis")
+
+            return web.json_response({
+                "status": "unpaused",
+                "symbol": symbol,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _handle_risk_paused(self, request: web.Request) -> web.Response:
+        """GET /api/risk/paused — get currently paused symbols."""
+        if not self._circuit_breaker:
+            return web.json_response({"error": "Circuit breaker not available"}, status=503)
+        try:
+            paused = await self._circuit_breaker.get_paused_symbols()
+            return web.json_response({
+                "paused_symbols": paused,
+                "count": len(paused),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+    # ------------------------------------------------------------------
+    # Handlers: Config Management API (for LLM auto-execution)
+    # ------------------------------------------------------------------
+
+    async def _handle_config_update(self, request: web.Request) -> web.Response:
+        """POST /api/config/update — update runtime config values.
+
+        Body: {"key": "risk_per_trade_pct", "value": 3.0}
+        Updates config.yaml and applies changes to running server.
+        """
+        import yaml
+        try:
+            body = await request.json()
+            key = body.get("key", "")
+            value = body.get("value")
+
+            if not key:
+                return web.json_response({"error": "key is required"}, status=400)
+
+            # Load and update config
+            cfg = load_config()
+            config_path = Path(__file__).resolve().parent.parent / "config.yaml"
+
+            # Support dotted keys like "risk_management.global.risk_per_trade_pct"
+            keys = key.split(".")
+            section = cfg.data
+            for k in keys[:-1]:
+                if k not in section:
+                    section[k] = {}
+                section = section[k]
+            section[keys[-1]] = value
+
+            # Write back to file
+            with open(config_path, "w") as f:
+                yaml.dump(dict(cfg.data), f, default_flow_style=False, sort_keys=False)
+
+            # Apply to running instance
+            risk_global = cfg.risk_global
+            if "risk_per_trade_pct" in key or "max_leverage" in key or "max_open_positions" in key:
+                # Re-init risk manager on next check
+                self._log.info(f"Config updated: {key} = {value} (will apply on next trade)")
+
+            self._log.info(f"Config updated: {key} = {value}")
+
+            return web.json_response({
+                "status": "updated",
+                "key": key,
+                "value": value,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as exc:
+            self._log.error(f"Config update failed: {exc}")
+            return web.json_response({"error": str(exc)}, status=500)
+
+    # ------------------------------------------------------------------
+    # Handlers: Symbol Management API (for LLM auto-execution)
+    # ------------------------------------------------------------------
+
+    async def _handle_symbols_update(self, request: web.Request) -> web.Response:
+        """POST /api/symbols/update — update active trading symbols.
+
+        Body: {"symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"]}
+        Also updates config.yaml and reloads websocket.
+        """
+        import yaml
+        try:
+            body = await request.json()
+            new_symbols = body.get("symbols", [])
+            if not new_symbols or len(new_symbols) < 2:
+                return web.json_response({"error": "At least 2 symbols required"}, status=400)
+
+            new_symbols = [s.upper() for s in new_symbols]
+
+            # Update config.yaml
+            cfg = load_config()
+            config_path = Path(__file__).resolve().parent.parent / "config.yaml"
+            if "trading_server" not in cfg.data:
+                cfg.data["trading_server"] = {}
+            cfg.data["trading_server"]["symbols"] = new_symbols
+            with open(config_path, "w") as f:
+                yaml.dump(dict(cfg.data), f, default_flow_style=False, sort_keys=False)
+
+            # Reload symbols in running server
+            old_symbols = self._symbols.copy()
+            self._symbols = new_symbols
+
+            # Reconnect WebSocket with new symbols
+            if self._ws:
+                await self._ws.stop()
+                self._ws = BinanceWebSocket(
+                    symbols=self._symbols,
+                    timeframes=["1m", "5m"],
+                )
+                self._ws.register_callback(self._on_ws_candle)
+                await self._ws.start()
+
+            # Re-register REST polling for new symbols
+            self._last_poll = {}
+
+            self._log.info(f"Symbols updated: {old_symbols} → {self._symbols}")
+
+            return web.json_response({
+                "status": "updated",
+                "old_symbols": old_symbols,
+                "new_symbols": self._symbols,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception as exc:
+            self._log.error(f"Symbol update failed: {exc}")
+            return web.json_response({"error": str(exc)}, status=500)
 
 
 # ---------------------------------------------------------------------------
