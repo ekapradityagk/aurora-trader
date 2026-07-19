@@ -35,6 +35,7 @@ from integration.winrate_db import WinrateDB
 from integration.rollback import RollbackManager
 from integration.coordinator import Coordinator
 from integration.projection_db import ProjectionDB
+from integration.trade_sync import TradeSyncManager
 
 logger = get_logger("integration.server")
 
@@ -130,6 +131,7 @@ class IntegrationServer:
         self._rollback = RollbackManager()
         self._coordinator = Coordinator()
         self._projection_db = ProjectionDB()
+        self._trade_sync = TradeSyncManager()
 
         # HTTP server
         self._app: Optional[web.Application] = None
@@ -162,6 +164,7 @@ class IntegrationServer:
             await self._rollback.initialize()
             await self._projection_db.initialize()
             await self._coordinator.start()
+            await self._trade_sync.start()
             self._proxy_session = aiohttp.ClientSession()
             self._log.info("Sub-systems initialised")
 
@@ -197,6 +200,9 @@ class IntegrationServer:
 
         # Stop coordinator
         await self._coordinator.stop()
+
+        # Stop trade sync
+        await self._trade_sync.stop()
 
         # Close projection DB
         await self._projection_db.close()
@@ -255,6 +261,7 @@ class IntegrationServer:
         self._app.router.add_put("/api/projections/input", self._handle_projections_input_save)
         self._app.router.add_delete("/api/projections/input/{input_date}", self._handle_projections_input_delete)
         self._app.router.add_get("/api/projections/inputs", self._handle_projections_inputs_list)
+        self._app.router.add_get("/api/daily-report", self._handle_daily_report)
 
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
@@ -1164,6 +1171,137 @@ class IntegrationServer:
             return web.json_response({"status": "deleted", "date": date})
 
         except Exception as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+
+    async def _handle_daily_report(self, request: web.Request) -> web.Response:
+        """GET /api/daily-report — get yesterday's trade summary for LLM analysis.
+
+        Returns a structured report of yesterday's closed trades, PnL,
+        fees, funding, and circuit breaker state.
+        """
+        from datetime import datetime, timedelta, timezone, date
+        import os
+
+        try:
+            # Determine date: default to yesterday, or ?date=YYYY-MM-DD
+            date_param = request.query.get("date", "")
+            if date_param:
+                report_date = datetime.strptime(date_param, "%Y-%m-%d").date()
+            else:
+                report_date = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+
+            date_str = report_date.strftime("%Y-%m-%d")
+            report = {
+                "date": date_str,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "summary": {
+                    "total_realized_pnl": 0.0,
+                    "total_commission": 0.0,
+                    "total_funding": 0.0,
+                    "trade_count": 0,
+                    "win_count": 0,
+                    "loss_count": 0,
+                },
+                "trades": [],
+                "fees": [],
+                "funding": [],
+                "positions": [],
+                "circuit_breaker": {},
+                "projections": {},
+            }
+
+            # Fetch from Binance
+            try:
+                from binance.client import Client
+
+                key = self._cfg.exchange_api_key
+                secret = self._cfg.exchange_api_secret
+                if key and secret:
+                    client = Client(key, secret)
+                    day_start_ms = int(datetime.combine(report_date, datetime.min.time()).timestamp() * 1000)
+                    day_end_ms = int(datetime.combine(report_date, datetime.min.time()).timestamp() * 1000) + 86400000
+
+                    income = client.futures_income_history(startTime=day_start_ms, endTime=day_end_ms, limit=500)
+                    client.close_connection()
+
+                    for entry in income:
+                        income_type = entry["incomeType"]
+                        symbol = entry.get("symbol", "—")
+                        amount = float(entry["income"])
+                        ts = int(entry["time"])
+                        time_str = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).strftime("%H:%M UTC")
+
+                        if income_type == "REALIZED_PNL":
+                            side = "LONG" if amount >= 0 else "SHORT"
+                            report["trades"].append({
+                                "time": time_str,
+                                "symbol": symbol,
+                                "side": side,
+                                "pnl": round(amount, 2),
+                            })
+                            report["summary"]["total_realized_pnl"] += amount
+                            report["summary"]["trade_count"] += 1
+                            if amount > 0:
+                                report["summary"]["win_count"] += 1
+                            else:
+                                report["summary"]["loss_count"] += 1
+                        elif income_type == "COMMISSION":
+                            report["fees"].append({
+                                "time": time_str,
+                                "symbol": symbol,
+                                "amount": round(amount, 2),
+                            })
+                            report["summary"]["total_commission"] += amount
+                        elif income_type == "FUNDING_FEE":
+                            report["funding"].append({
+                                "time": time_str,
+                                "symbol": symbol,
+                                "amount": round(amount, 2),
+                            })
+                            report["summary"]["total_funding"] += amount
+
+                    report["summary"]["total_realized_pnl"] = round(report["summary"]["total_realized_pnl"], 2)
+                    report["summary"]["total_commission"] = round(report["summary"]["total_commission"], 2)
+                    report["summary"]["total_funding"] = round(report["summary"]["total_funding"], 2)
+                    net = report["summary"]["total_realized_pnl"] + report["summary"]["total_commission"] + report["summary"]["total_funding"]
+                    report["summary"]["net_pnl"] = round(net, 2)
+
+            except Exception as exc:
+                self._log.debug(f"Daily report Binance fetch error: {exc}")
+
+            # Get circuit breaker state
+            try:
+                async with self._proxy_session.get(
+                    "http://127.0.0.1:8900/risk/state", timeout=aiohttp.ClientTimeout(total=3)
+                ) as resp:
+                    if resp.status == 200:
+                        cb_state = await resp.json()
+                        report["circuit_breaker"] = cb_state
+            except Exception:
+                pass
+
+            # Get open positions
+            try:
+                async with self._proxy_session.get(
+                    "http://127.0.0.1:8900/positions", timeout=aiohttp.ClientTimeout(total=3)
+                ) as resp:
+                    if resp.status == 200:
+                        pos_data = await resp.json()
+                        positions = pos_data.get("positions", [])
+                        for p in positions:
+                            report["positions"].append({
+                                "symbol": p.get("symbol", "?"),
+                                "side": p.get("side", "?"),
+                                "pnl": round(float(p.get("unrealized_pnl", 0)), 2),
+                                "roi_pct": round(float(p.get("roi_pct", 0)), 2),
+                            })
+            except Exception:
+                pass
+
+            return web.json_response(report)
+
+        except Exception as exc:
+            self._log.error(f"Daily report failed: {exc}", exc_info=True)
             return web.json_response({"error": str(exc)}, status=500)
 
     async def _handle_projections_inputs_list(self, request: web.Request) -> web.Response:
