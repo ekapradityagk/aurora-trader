@@ -41,7 +41,7 @@ strategies:
       max_signals_per_day: 10
       min_confidence: 0.65
   rsi_divergence:
-    enabled: false
+    enabled: true
     timeframes:
       fast: 5m
       medium: 1h
@@ -122,6 +122,7 @@ risk_management:
     max_leverage: 5
     max_daily_trades: 50
     max_open_positions: 6
+    risk_per_trade_pct: 2.0
     max_drawdown_pct: 15.0
     daily_loss_limit_pct: 5.0
     max_slippage_pct: 0.1
@@ -195,20 +196,19 @@ trading_server:
   host: 0.0.0.0
   port: 8900
   symbols:
-  - TIAUSDT
-  - XRPUSDT
+  - DOTUSDT
+  - LTCUSDT
   - AVAXUSDT
-  - SOLUSDT
-  - UNIUSDT
   - ATOMUSDT
+  - TIAUSDT
+  - LINKUSDT
   database:
     path: data/trading.db
   websocket:
     max_retries: 5
     retry_delay_seconds: 2.0
     ping_interval_seconds: 30
-  # Discord webhook URL for trailing stop notifications (empty = disabled)
-  discord_webhook_url: ""
+  discord_webhook_url: ''
 integration:
   host: 0.0.0.0
   port: 8903

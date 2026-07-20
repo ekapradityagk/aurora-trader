@@ -32,6 +32,18 @@ async def wallet_main():
     await run_scanner(host="0.0.0.0", port=8902)
 
 async def main():
+    # Cleanup existing processes on our ports
+    import psutil
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            for conn in proc.connections():
+                if conn.laddr.port in [8900, 8901, 8902, 8903]:
+                    print(f"🧹 Killing leftover process {proc.pid} on port {conn.laddr.port}")
+                    proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    await asyncio.sleep(1)
+
     from trading_server.server import main as trading_main
     from integration.server import main as integration_main
     

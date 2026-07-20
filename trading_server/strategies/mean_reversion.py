@@ -57,9 +57,7 @@ class MeanReversionStrategy(BaseStrategy):
         self._rsi_period = params.get("rsi_period", self._rsi_period)
 
         risk = config.get("risk", {})
-        self._atr_multiplier = risk.get("stop_loss_pct", 2.0) / 100.0
-        if self._atr_multiplier <= 0:
-            self._atr_multiplier = 2.0
+        self._atr_multiplier = 2.0  # Fixed: 2x ATR for stop distance
 
         self._log = logger
 

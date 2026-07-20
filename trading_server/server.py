@@ -675,7 +675,26 @@ class TradingServer:
                 )
                 return
 
-            # 3. Place the market order
+            # 3. Round to LOT_SIZE step before placing order
+            try:
+                client = await self._rest._ensure_client()
+                info = await client.futures_exchange_info()
+                step_size = 0.001
+                for s in info["symbols"]:
+                    if s["symbol"] == symbol:
+                        for f in s["filters"]:
+                            if f["filterType"] == "LOT_SIZE":
+                                step_size = float(f["stepSize"])
+                        break
+                step_dec = Decimal(str(step_size))
+                size = (size // step_dec) * step_dec
+                if size <= 0:
+                    self._log.warning(f"{symbol} | Rounded size to zero — skipping")
+                    return
+            except Exception:
+                pass  # Fall through with unrounded size, exchange will reject if wrong
+
+            # 4. Place the market order
             side_str = "BUY" if signal.direction == SignalDirection.LONG else "SELL"
             order = await self._rest.place_market_order(
                 symbol=symbol,
@@ -955,15 +974,11 @@ class TradingServer:
 
     async def _update_positions_loop(self) -> None:
         """Periodically check and update open positions."""
-        exchange_sync_counter = 0
         balance_sync_counter = 0
         while self._running:
             try:
-                # Full exchange sync every ~5 minutes (10 × 30s)
-                exchange_sync_counter += 1
-                if exchange_sync_counter >= 10:
-                    exchange_sync_counter = 0
-                    await self._verify_positions_with_exchange()
+                # Full exchange sync every cycle (30s)
+                await self._verify_positions_with_exchange()
 
                 # Balance sync from Binance every ~2 minutes (4 × 30s)
                 balance_sync_counter += 1
@@ -1037,7 +1052,8 @@ class TradingServer:
                                     self._trailing_events.append(event)
                                     if len(self._trailing_events) > self._max_trailing_events:
                                         self._trailing_events.pop(0)
-                                    # Cron-based Discord notification (handled externally)
+                                    # Send Discord webhook notification
+                                    await self._send_discord_webhook(event)
                             elif action == "break_even":
                                 self._log.info(
                                     f"{symbol} | Break-even activated: "
@@ -1518,8 +1534,10 @@ class TradingServer:
         # === Calculate position size ===
         balance = float(self._account_balance)
         cfg = load_config()
-        lev = int(cfg.data.get("exchange", {}).get("default_leverage", 20))
-        risk_pct = cfg.risk_per_trade_pct / 100.0  # e.g. 5% → 0.05
+        # Use risk-manager's max_leverage (5x) NOT exchange config (20x)
+        risk_global = cfg.risk_global
+        lev = int(risk_global.get("max_leverage", 5))
+        risk_pct = cfg.risk_per_trade_pct / 100.0  # e.g. 2.0% → 0.02
         risk_per_trade = balance * risk_pct
 
         price = body.get("price", 0)
@@ -1600,10 +1618,11 @@ class TradingServer:
                 sl_side = "BUY"
 
             # Use binance client directly for STOP_MARKET order
+            # Use str(quantity) to avoid float precision issues with LOT_SIZE
             sl_params = {
                 "symbol": symbol,
                 "side": sl_side,
-                "quantity": float(quantity),
+                "quantity": str(quantity),
                 "stopPrice": stop_price,
                 "type": "STOP_MARKET",
             }
@@ -1769,27 +1788,24 @@ class TradingServer:
                 return web.json_response({"error": "symbol is required"}, status=400)
             reason = body.get("reason", "manual_pause")
 
-            # Check if already paused
-            if await self._circuit_breaker.is_symbol_paused(symbol):
+            # Pause the symbol properly using the dedicated method
+            paused = await self._circuit_breaker.pause_symbol(
+                symbol=symbol,
+                reason=reason,
+            )
+            if not paused:
                 return web.json_response({
                     "status": "already_paused",
                     "symbol": symbol,
                 })
-
-            # Pause by recording a dummy PnL that triggers the per-symbol limit
-            from decimal import Decimal
-            await self._circuit_breaker.record_trade_pnl(
-                symbol=symbol,
-                pnl=Decimal("-999999"),
-                reason=reason,
-            )
             self._log.info(f"{symbol} | AUTO-PAUSED by LLM analysis: {reason}")
 
             # Also remove any open position for this symbol
             if symbol in self._positions and self._positions[symbol].is_open:
                 pos = self._positions[symbol]
                 pos.status = PositionStatus.CLOSED
-                pos.close_price = pos.current_price or pos.entry_price
+                pos.exit_price = pos.current_price or pos.entry_price
+                pos.exit_reason = reason
                 del self._positions[symbol]
                 self._log.info(f"{symbol} | Position auto-closed due to pause")
 

@@ -207,6 +207,7 @@ class Position(BaseModel):
     trailing_stop_pct: Optional[float] = None
     entry_time: datetime
     exit_time: Optional[datetime] = None
+    exit_price: Optional[Decimal] = None
     exit_reason: Optional[str] = None
     signal_id: Optional[str] = None
     trades: List[Trade] = Field(default_factory=list)

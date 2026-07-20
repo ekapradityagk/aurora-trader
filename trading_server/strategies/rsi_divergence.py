@@ -419,5 +419,17 @@ class RsiDivergenceStrategy(BaseStrategy):
 
 
 def opens_estimate(close: float, high: float, low: float) -> float:
-    """Estimate the open price from OHLC data."""
-    return (high + low) / 2.0
+    """Estimate the open price from OHLC data when only the close is reliable.
+
+    If close is in the lower half of the range, the open was likely higher
+    (bearish candle). If close is in the upper half, open was likely lower
+    (bullish candle).
+    """
+    range_span = high - low
+    if range_span == 0:
+        return close
+    # Close position within candle as fraction [0,1]
+    pos_in_range = (close - low) / range_span
+    # Estimate open symmetrically: if close is near low, open was near high
+    estimated_open = high - (pos_in_range * range_span)
+    return estimated_open

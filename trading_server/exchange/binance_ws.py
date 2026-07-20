@@ -212,7 +212,7 @@ class BinanceWebSocket:
         while self._running:
             try:
                 attempt += 1
-                self._log.info(
+                self._log.debug(
                     f"Connecting to Binance WebSocket (attempt {attempt})..."
                 )
 
@@ -244,25 +244,21 @@ class BinanceWebSocket:
                     self._ws = bm.multiplex_socket(self._streams)
 
                 async with self._ws as stream:
+                    # Unified processing loop
                     self._log.info("WebSocket connected successfully")
                     attempt = 0  # reset backoff on successful connect
                     self._subscribed_streams = set(self._streams)
 
-                    # Handle both old (async generator) and new (recv-based) APIs
-                    try:
-                        async for msg in stream:
-                            if not self._running:
-                                break
-                            await self._handle_message(msg)
-                    except AttributeError:
-                        # Newer python-binance versions use recv()
-                        while self._running:
-                            try:
-                                msg = await stream.recv()
-                                if msg:
-                                    await self._handle_message(msg)
-                            except asyncio.TimeoutError:
-                                continue
+                    while self._running:
+                        try:
+                            msg = await stream.recv()
+                            if msg:
+                                await self._handle_message(msg)
+                        except asyncio.TimeoutError:
+                            continue
+                        except Exception as exc:
+                            self._log.error(f"Error in WS stream loop: {exc}")
+                            break # trigger reconnection
 
                 # Clean disconnect
                 await client.close_connection()
@@ -284,7 +280,7 @@ class BinanceWebSocket:
                         f"giving up on WebSocket"
                     )
                     break
-                self._log.info(f"Reconnecting in {delay:.1f}s (attempt {attempt})")
+                self._log.debug(f"Reconnecting in {delay:.1f}s (attempt {attempt})")
                 await asyncio.sleep(delay)
 
     async def _handle_message(self, raw: Dict[str, Any]) -> None:

@@ -253,6 +253,39 @@ class CircuitBreaker:
         except Exception:
             return False
 
+    async def pause_symbol(self, symbol: str, reason: str = "manual_pause") -> bool:
+        """Pause a specific symbol without recording fake PnL.
+
+        Directly inserts a row into paused_symbols so the per-symbol circuit
+        breaker blocks new trades on this symbol for the rest of the day.
+
+        Returns True if the symbol was newly paused, False if already paused.
+        """
+        if not self._conn:
+            return False
+        today = self._utc_date()
+        now = self._utc_now_str()
+        try:
+            c = await self._conn.execute(
+                "SELECT 1 FROM paused_symbols WHERE symbol = ? AND date = ?",
+                (symbol, today),
+            )
+            if await c.fetchone():
+                return False  # Already paused
+            await self._conn.execute(
+                "INSERT INTO paused_symbols (symbol, date, reason, paused_at) "
+                "VALUES (?, ?, ?, ?)",
+                (symbol, today, reason, now),
+            )
+            await self._conn.commit()
+            self._log.info(
+                f"{symbol} | Paused for the day: {reason}"
+            )
+            return True
+        except Exception as exc:
+            self._log.debug(f"pause_symbol failed for {symbol}: {exc}")
+            return False
+
     async def unpause_symbol(self, symbol: str) -> None:
         """Remove a symbol from the paused list (e.g. at UTC reset)."""
         if not self._conn:

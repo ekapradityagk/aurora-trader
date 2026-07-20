@@ -67,8 +67,7 @@
 │   │   ├── binance_ws.py      # WebSocket streams
 │   │   └── binance_rest.py    # REST API calls
 │   └── risk/
-│       ├── manager.py         # Position sizing
-│       ├── stops.py           # ATR/break-even/trailing
+│       ├── manager.py         # Position sizing + ATR stops/break-even/trailing
 │       └── circuit_breaker.py # Daily loss limit
 ├── learning_server/
 │   ├── hyperopt.py            # Optuna optimization
