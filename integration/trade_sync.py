@@ -116,7 +116,15 @@ class TradeSyncManager:
     # ------------------------------------------------------------------
 
     async def _sync_binance_trades(self) -> None:
-        """Fetch recent Binance trades and record them locally."""
+        """Fetch recent Binance trades and record them locally.
+
+        Uses TWO data sources:
+          1. futures_account_trades() — real fills with price, qty, side, realizedPnl
+          2. futures_income_history() — PnL summary, funding, commissions
+
+        Account trades take priority — they provide REAL entry/exit prices
+        instead of the zeros we get from income history alone.
+        """
         try:
             from binance.client import Client
 
@@ -130,7 +138,44 @@ class TradeSyncManager:
                 now_ms = int(time.time() * 1000)
                 lookback = INITIAL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
 
-                # 1. Futures income history for PnL + fees + funding
+                # 1. Fetch REAL account trade fills (has prices, qty, side, realizedPnl)
+                account_trades_raw: List[Dict[str, Any]] = []
+                try:
+                    # Fetch by symbol — iterate over known active symbols
+                    active_symbols = self._cfg.data.get("trading_server", {}).get("symbols", [])
+                    for sym in active_symbols:
+                        try:
+                            fills = client.futures_account_trades(
+                                symbol=sym,
+                                startTime=now_ms - lookback,
+                                limit=200,
+                            )
+                            account_trades_raw.extend(fills)
+                        except Exception:
+                            pass
+                    self._log.info(f"Fetched {len(account_trades_raw)} account trade fills")
+                except Exception as exc:
+                    self._log.debug(f"Account trades fetch failed: {exc}")
+
+                # Index account trades by time for quick matching
+                account_trades_by_time: Dict[int, Dict[str, Any]] = {}
+                for t in account_trades_raw:
+                    ts = int(t.get("time", 0))
+                    sym = t.get("symbol", "")
+                    realized_pnl = float(t.get("realizedPnl", 0))
+                    # Only care about trades that moved the balance
+                    if realized_pnl != 0:
+                        account_trades_by_time[ts] = {
+                            "symbol": sym,
+                            "price": float(t.get("price", 0)),
+                            "qty": float(t.get("qty", 0)),
+                            "side": "BUY" if t.get("buyer") else "SELL",
+                            "realizedPnl": realized_pnl,
+                            "time": ts,
+                            "commission": float(t.get("commission", 0)),
+                        }
+
+                # 2. Futures income history for PnL + fees + funding (legacy path)
                 income = client.futures_income_history(
                     startTime=now_ms - lookback, limit=500
                 )
@@ -170,25 +215,62 @@ class TradeSyncManager:
                         "timestamp": time_str,
                     })
 
-                    # For REALIZED_PNL, also create a trade record
+                    # For REALIZED_PNL, try to find matching account trade for real prices
                     if income_type == "REALIZED_PNL":
-                        # Determine side from PnL sign (Binance doesn't include side in income history)
-                        # We'll try to get more detail from futures_account_trades
-                        side = "LONG" if amount >= 0 else "SHORT"
+                        # Find nearest account trade by time (±5s window)
+                        matched_trade: Optional[Dict[str, Any]] = None
+                        min_diff = 5000  # 5 seconds in ms
+                        for ats, at in account_trades_by_time.items():
+                            sym_match = at["symbol"] == symbol or symbol in at["symbol"]
+                            if sym_match:
+                                diff = abs(ats - ts)
+                                if diff < min_diff:
+                                    min_diff = diff
+                                    matched_trade = at
+
                         version_tag = "v0.1.0"
 
-                        new_trades.append({
-                            "trade_id": f"binance_pnl_{entry['time']}",
-                            "version_tag": version_tag,
-                            "strategy": "mean_reversion",
-                            "symbol": symbol,
-                            "side": side,
-                            "entry_price": 0.0,  # Not available from income history
-                            "exit_price": 0.0,
-                            "pnl": amount,
-                            "rrr": 0.0,
-                            "closed_at": time_str,
-                        })
+                        if matched_trade:
+                            # REAL data from account trades!
+                            at = matched_trade
+                            # Determine LONG/SHORT side from price movement context
+                            # Account trade side is BUY/SELL (the direction of the fill)
+                            # For position PnL: if realizedPnl > 0 → profitable direction
+                            side = "LONG" if amount >= 0 else "SHORT"
+                            entry_price = at["price"]
+                            exit_price = at["price"]  # Same fill price since each record is one fill
+
+                            new_trades.append({
+                                "trade_id": f"binance_fill_{at['time']}",
+                                "version_tag": version_tag,
+                                "strategy": "exchange_sync",
+                                "symbol": symbol,
+                                "side": side,
+                                "entry_price": entry_price,
+                                "exit_price": exit_price,
+                                "pnl": amount,
+                                "qty": at["qty"],
+                                "rrr": 0.0,
+                                "closed_at": time_str,
+                                "source": "binance_trade_fill",
+                            })
+                        else:
+                            # Fallback: use income data with best-effort guess
+                            side = "LONG" if amount >= 0 else "SHORT"
+                            new_trades.append({
+                                "trade_id": f"binance_pnl_{entry['time']}",
+                                "version_tag": version_tag,
+                                "strategy": "exchange_sync",
+                                "symbol": symbol,
+                                "side": side,
+                                "entry_price": 0.0,
+                                "exit_price": 0.0,
+                                "pnl": amount,
+                                "qty": 0.0,
+                                "rrr": 0.0,
+                                "closed_at": time_str,
+                                "source": "binance_income",
+                            })
 
                     self._synced_ids.add(trade_id)
 
@@ -202,7 +284,13 @@ class TradeSyncManager:
                 if new_trades:
                     await self._write_trade_results(new_trades)
                     await self._write_trades_analyzer(new_trades)
-                    self._log.info(f"Synced {len(new_trades)} closed trades")
+                    # Count how many have real prices
+                    with_prices = sum(1 for t in new_trades if t.get("entry_price", 0) > 0)
+                    self._log.info(
+                        f"Synced {len(new_trades)} closed trades "
+                        f"({with_prices} with real prices, "
+                        f"{len(new_trades) - with_prices} income-only)"
+                    )
 
                     # Update circuit breaker balance for any REALIZED_PNL
                     total_pnl = sum(t["pnl"] for t in new_trades)

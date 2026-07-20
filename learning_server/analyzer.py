@@ -15,7 +15,7 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import aiosqlite
 
@@ -86,8 +86,9 @@ class TradeAnalyzer:
         report = await analyzer.analyze()
     """
 
-    def __init__(self, db_path: str = "data/trades.db") -> None:
+    def __init__(self, db_path: str = "data/trades.db", cb_db_path: str = "data/trading.db") -> None:
         self._db_path = db_path
+        self._cb_db_path = cb_db_path
         self._log = logger
         self._cfg = load_config()
 
@@ -179,8 +180,15 @@ class TradeAnalyzer:
     # ------------------------------------------------------------------
 
     async def _load_trades(self) -> List[Dict[str, Any]]:
-        """Load all closed trades from the trade journal."""
+        """Load all closed trades from the trade journal AND circuit breaker.
+
+        Queries both data/trades.db (TradeSync import) and data/trading.db
+        (CircuitBreaker real-time close records), deduplicating by exit_time + symbol.
+        """
         trades: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+
+        # 1. Load from trades.db (legacy TradeSync data)
         try:
             async with aiosqlite.connect(self._db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -195,9 +203,47 @@ class TradeAnalyzer:
                 )
                 rows = await cursor.fetchall()
                 for row in rows:
-                    trades.append(dict(row))
+                    d = dict(row)
+                    # Normalise legacy field names
+                    d["strategy_name"] = d.pop("strategy", "unknown")
+                    d["exit_time"] = d.get("exit_time") or d.get("exit_time", "")
+                    key = f"{d.get('exit_time', '')}_{d.get('symbol', '')}"
+                    if key not in seen:
+                        seen.add(key)
+                        trades.append(d)
         except Exception as exc:
             self._log.warning(f"Could not load trades from {self._db_path}: {exc}")
+
+        # 2. Load from circuit breaker's closed_trades (REAL data)
+        try:
+            async with aiosqlite.connect(self._cb_db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    """
+                    SELECT id, symbol, side, entry_price, exit_price, pnl,
+                           closed_at AS exit_time, strategy_name, leverage,
+                           entry_time, reason
+                    FROM closed_trades
+                    WHERE exit_price IS NOT NULL
+                      AND exit_price != 0
+                    ORDER BY closed_at ASC
+                    """
+                )
+                rows = await cursor.fetchall()
+                for row in rows:
+                    d = dict(row)
+                    d["entry_price"] = float(d.get("entry_price", 0) or 0)
+                    d["exit_price"] = float(d.get("exit_price", 0) or 0)
+                    d["pnl"] = float(d.get("pnl", 0) or 0)
+                    d["pnl_pct"] = 0.0  # CB doesn't track pnl_pct
+                    key = f"{d.get('exit_time', '')}_{d.get('symbol', '')}"
+                    if key not in seen:
+                        seen.add(key)
+                        trades.append(d)
+        except Exception as exc:
+            self._log.warning(f"Could not load trades from CB {self._cb_db_path}: {exc}")
+
+        self._log.info(f"Loaded {len(trades)} closed trades ({len(seen)} unique deduped)")
         return trades
 
     # ------------------------------------------------------------------

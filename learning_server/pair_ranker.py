@@ -59,9 +59,10 @@ class PairRanker:
     def __init__(self) -> None:
         self._cfg = load_config()
 
-        # Determine the integration DB path from config
+        # Determine the integration DB path from config — use winrate.db where
+        # TradeSync actually writes trade_results (not integration.db)
         int_cfg = self._cfg.data.get("integration", {})
-        db_path = int_cfg.get("database", {}).get("path", "data/integration.db")
+        db_path = int_cfg.get("database", {}).get("winrate_path", "data/winrate.db")
         # Resolve relative to project root (assumes CWD is project root)
         self._db_path = Path(db_path)
         if not self._db_path.is_absolute():

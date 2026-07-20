@@ -24,7 +24,7 @@ import random
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import aiosqlite
 
@@ -75,14 +75,17 @@ class OptimizationResult:
 # ---------------------------------------------------------------------------
 
 
-async def _load_closed_trades(db_path: str) -> List[Dict[str, Any]]:
-    """Load all closed trades from the SQLite trade journal.
+async def _load_closed_trades(db_path: str, cb_db_path: str = "data/trading.db") -> List[Dict[str, Any]]:
+    """Load all closed trades from the trade journal AND circuit breaker.
 
-    Expected schema (trades table):
-        id, strategy_name, symbol, side, entry_price, exit_price, quantity,
-        quote_quantity, pnl, pnl_pct, entry_time, exit_time, ...
+    Reads from both data/trades.db (TradeSync) and data/trading.db
+    (CircuitBreaker real-time) for maximum coverage, deduped by exit_time + symbol.
     """
     trades: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    logger = get_logger("learning_server.hyperopt")
+
+    # 1. Load from trades.db (legacy)
     try:
         async with aiosqlite.connect(db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -97,10 +100,49 @@ async def _load_closed_trades(db_path: str) -> List[Dict[str, Any]]:
             )
             rows = await cursor.fetchall()
             for row in rows:
-                trades.append(dict(row))
-        logger.info(f"Loaded {len(trades)} closed trades from {db_path}")
+                d = dict(row)
+                # Normalise legacy field names
+                if "strategy" in d and "strategy_name" not in d:
+                    d["strategy_name"] = d.pop("strategy")
+                d["exit_time"] = d.get("exit_time") or d.get("exit_time", "")
+                key = f"{d.get('exit_time', '')}_{d.get('symbol', '')}"
+                if key not in seen:
+                    seen.add(key)
+                    trades.append(d)
+        logger.info(f"Loaded {len(trades)} trades from {db_path}")
     except Exception as exc:
         logger.warning(f"Could not load trades from {db_path}: {exc}")
+
+    # 2. Load from circuit breaker's closed_trades (REAL entry/exit prices)
+    try:
+        async with aiosqlite.connect(cb_db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, symbol, side, entry_price, exit_price, pnl,
+                       closed_at AS exit_time, strategy_name, leverage,
+                       entry_time, reason
+                FROM closed_trades
+                WHERE exit_price IS NOT NULL
+                  AND exit_price != 0
+                ORDER BY closed_at ASC
+                """
+            )
+            rows = await cursor.fetchall()
+            for row in rows:
+                d = dict(row)
+                d["entry_price"] = float(d.get("entry_price", 0) or 0)
+                d["exit_price"] = float(d.get("exit_price", 0) or 0)
+                d["pnl"] = float(d.get("pnl", 0) or 0)
+                d["pnl_pct"] = 0.0
+                key = f"{d.get('exit_time', '')}_{d.get('symbol', '')}"
+                if key not in seen:
+                    seen.add(key)
+                    trades.append(d)
+        logger.info(f"Loaded {len(trades)} total trades after CB merge")
+    except Exception as exc:
+        logger.warning(f"Could not load trades from CB {cb_db_path}: {exc}")
+
     return trades
 
 
@@ -224,9 +266,11 @@ class HyperoptOptimizer:
     def __init__(
         self,
         db_path: str = "data/trades.db",
+        cb_db_path: str = "data/trading.db",
         output_dir: str = "data/optimization",
     ) -> None:
         self._db_path = db_path
+        self._cb_db_path = cb_db_path
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
         self._log = logger
@@ -256,7 +300,7 @@ class HyperoptOptimizer:
         timeout = timeout or optuna_cfg.get("timeout_seconds", 3600)
 
         # 1. Load trades
-        all_trades = await _load_closed_trades(self._db_path)
+        all_trades = await _load_closed_trades(self._db_path, self._cb_db_path)
         if not all_trades:
             self._log.warning("No closed trades found — skipping optimisation")
             return OptimizationResult()

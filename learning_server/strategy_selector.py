@@ -94,9 +94,11 @@ class StrategySelector:
     def __init__(
         self,
         db_path: str = "data/trades.db",
+        cb_db_path: str = "data/trading.db",
         state_file: str = "data/active_strategy.json",
     ) -> None:
         self._db_path = db_path
+        self._cb_db_path = cb_db_path
         self._state_file = Path(state_file)
         self._state_file.parent.mkdir(parents=True, exist_ok=True)
         self._log = logger
@@ -281,11 +283,16 @@ class StrategySelector:
     async def _get_strategy_performance(
         self,
     ) -> Dict[str, float]:
-        """Get recent win rate for each strategy from the trade journal.
+        """Get recent win rate for each strategy from all trade sources.
 
-        Returns dict of {strategy_name: win_rate}.
+        Queries trades.db (legacy) and trading.db closed_trades (real-time)
+        to get the most recent per-strategy win rates. Returns neutral (0.5)
+        for strategies with no data.
         """
         perf: Dict[str, float] = {}
+        all_trades: Dict[str, List[float]] = {s: [] for s in STRATEGY_NAMES}
+
+        # 1. Load from trades.db (legacy TradeSync data)
         try:
             async with aiosqlite.connect(self._db_path) as db:
                 db.row_factory = aiosqlite.Row
@@ -294,7 +301,7 @@ class StrategySelector:
                         """
                         SELECT pnl, pnl_pct
                         FROM trades
-                        WHERE strategy_name = ?
+                        WHERE strategy = ?
                           AND exit_price IS NOT NULL
                           AND pnl IS NOT NULL
                         ORDER BY exit_time DESC
@@ -303,17 +310,69 @@ class StrategySelector:
                         (s, PERFORMANCE_LOOKBACK_TRADES),
                     )
                     rows = await cursor.fetchall()
-                    if not rows:
-                        perf[s] = 0.5  # neutral
-                        continue
-                    wins = sum(1 for r in rows if (r["pnl"] or 0) > 0)
-                    perf[s] = wins / len(rows)
+                    for r in rows:
+                        all_trades[s].append(float(r["pnl"] or 0))
         except Exception as exc:
-            self._log.warning(
-                f"Could not load strategy performance: {exc}"
-            )
-            for s in STRATEGY_NAMES:
-                perf[s] = 0.5
+            self._log.debug(f"Could not load legacy perf: {exc}")
+
+        # 2. Load from circuit breaker's closed_trades (REAL strategy names + prices)
+        try:
+            async with aiosqlite.connect(self._cb_db_path) as db:
+                db.row_factory = aiosqlite.Row
+                for s in STRATEGY_NAMES:
+                    cursor = await db.execute(
+                        """
+                        SELECT pnl
+                        FROM closed_trades
+                        WHERE strategy_name = ?
+                          AND exit_price IS NOT NULL
+                          AND exit_price != 0
+                        ORDER BY closed_at DESC
+                        LIMIT ?
+                        """,
+                        (s, PERFORMANCE_LOOKBACK_TRADES),
+                    )
+                    rows = await cursor.fetchall()
+                    for r in rows:
+                        all_trades[s].append(float(r["pnl"] or 0))
+                # Also grab trades from exchange_sync / auto_signal strategies
+                cursor = await db.execute(
+                    """
+                    SELECT strategy_name, pnl
+                    FROM closed_trades
+                    WHERE strategy_name NOT IN ('', 'mean_reversion', 'rsi_divergence', 'trend_follow')
+                      AND exit_price IS NOT NULL
+                      AND exit_price != 0
+                    ORDER BY closed_at DESC
+                    LIMIT 50
+                    """
+                )
+                rows = await cursor.fetchall()
+                # Distribute unknown-strategy trades to the "best guess" strategy
+                # based on the strategy_selector's current active strategy
+                for r in rows:
+                    s = r["strategy_name"] or "unknown"
+                    if s not in all_trades:
+                        all_trades[s] = []
+                    all_trades[s].append(float(r["pnl"] or 0))
+        except Exception as exc:
+            self._log.debug(f"Could not load CB perf: {exc}")
+
+        # Compute win rates
+        for s in STRATEGY_NAMES:
+            pnls = all_trades.get(s, [])
+            if len(pnls) >= 3:
+                wins = sum(1 for p in pnls if p > 0)
+                perf[s] = wins / len(pnls)
+                self._log.debug(f"  {s}: {wins}/{len(pnls)} wins = {perf[s]:.2f}")
+            else:
+                perf[s] = 0.5  # neutral — insufficient data
+
+        # Also include any extra strategies we discovered
+        for s, pnls in all_trades.items():
+            if s not in STRATEGY_NAMES and len(pnls) >= 3:
+                wins = sum(1 for p in pnls if p > 0)
+                perf[s] = wins / len(pnls)
 
         return perf
 

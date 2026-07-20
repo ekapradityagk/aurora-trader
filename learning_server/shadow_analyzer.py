@@ -122,9 +122,10 @@ class ShadowAnalyzer:
         self._cfg = load_config()
         self._log = logger
 
-        # Determine DB path
+        # Determine DB path — read from winrate.db where TradeSync actually writes
+        # (not integration.db which never receives trade data)
         int_cfg = self._cfg.data.get("integration", {})
-        db_path = int_cfg.get("database", {}).get("path", "data/integration.db")
+        db_path = int_cfg.get("database", {}).get("winrate_path", "data/winrate.db")
         self._db_path = Path(db_path)
         if not self._db_path.is_absolute():
             self._db_path = Path.cwd() / self._db_path
