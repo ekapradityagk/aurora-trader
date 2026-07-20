@@ -282,7 +282,9 @@ class TradeSyncManager:
                     self._log.info(f"Synced {len(new_pnl_logs)} PnL entries")
 
                 if new_trades:
+                    # Write trade results to trading.db (single source of truth)
                     await self._write_trade_results(new_trades)
+                    # Write legacy-format trades for analyzer (same DB now)
                     await self._write_trades_analyzer(new_trades)
                     # Count how many have real prices
                     with_prices = sum(1 for t in new_trades if t.get("entry_price", 0) > 0)
@@ -331,44 +333,39 @@ class TradeSyncManager:
             self._log.debug(f"Could not write PnL logs: {exc}")
 
     async def _write_trade_results(self, trades: List[Dict[str, Any]]) -> None:
-        """Write trades to winrate.db trade_results table."""
-        db_path = self._project_root / "data" / "winrate.db"
+        """Write trades to trading.db closed_trades (single source of truth)."""
+        db_path = self._project_root / "data" / "trading.db"
         try:
             async with aiosqlite.connect(str(db_path)) as db:
+                from datetime import datetime, timezone
                 for t in trades:
                     await db.execute(
-                        """INSERT OR IGNORE INTO trade_results
-                           (trade_id, version_tag, strategy, symbol, side,
-                            entry_price, exit_price, pnl, rrr, closed_at)
+                        """INSERT OR IGNORE INTO closed_trades
+                           (symbol, side, entry_price, exit_price, pnl,
+                            reason, leverage, closed_at, entry_time, strategy_name)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (t["trade_id"], t["version_tag"], t["strategy"], t["symbol"],
-                         t["side"], t["entry_price"], t["exit_price"],
-                         t["pnl"], t["rrr"], t["closed_at"]),
+                        (
+                            t["symbol"],
+                            t["side"],
+                            t.get("entry_price", 0) or 0,
+                            t.get("exit_price", 0) or 0,
+                            t["pnl"],
+                            t.get("source", "trade_sync"),
+                            1,
+                            t["closed_at"],
+                            "",
+                            t.get("strategy", "exchange_sync"),
+                        ),
                     )
                 await db.commit()
         except Exception as exc:
             self._log.debug(f"Could not write trade results: {exc}")
 
     async def _write_trades_analyzer(self, trades: List[Dict[str, Any]]) -> None:
-        """Write trades to trades.db (for TradeAnalyzer)."""
-        db_path = self._project_root / "data" / "trades.db"
-        try:
-            async with aiosqlite.connect(str(db_path)) as db:
-                # Ensure schema
-                await db.executescript(TRADES_DB_SCHEMA)
-                now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                for t in trades:
-                    await db.execute(
-                        """INSERT OR IGNORE INTO trades
-                           (id, strategy, symbol, side, exit_price,
-                            exit_time, pnl, status, source, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, 'closed', 'binance', ?)""",
-                        (t["trade_id"], t["strategy"], t["symbol"], t["side"],
-                         t["exit_price"], t["closed_at"], t["pnl"], now),
-                    )
-                await db.commit()
-        except Exception as exc:
-            self._log.debug(f"Could not write analyzer trades: {exc}")
+        """Legacy — now writes to same trading.db closed_trades (no-op)."""
+        # Data is already written to trading.db closed_trades by _write_trade_results.
+        # This method kept for backward compatibility until all callers are updated.
+        pass
 
     async def _update_circuit_breaker_pnl(self, trades: List[Dict[str, Any]]) -> None:
         """Update circuit breaker with realized PnL from trades."""
@@ -388,28 +385,14 @@ class TradeSyncManager:
             self._log.debug(f"Could not update circuit breaker: {exc}")
 
     async def _load_synced_ids(self) -> None:
-        """Load already-synced trade IDs from existing databases to avoid duplicates."""
-        # Load from winrate.db trade_results
-        db_path = self._project_root / "data" / "winrate.db"
+        """Load already-synced trade IDs from trading.db to avoid duplicates."""
+        db_path = self._project_root / "data" / "trading.db"
         try:
             async with aiosqlite.connect(str(db_path)) as db:
-                cursor = await db.execute("SELECT trade_id FROM trade_results")
+                cursor = await db.execute("SELECT id FROM closed_trades")
                 rows = await cursor.fetchall()
                 for row in rows:
-                    self._synced_ids.add(row[0])
+                    self._synced_ids.add(f"trade_{row[0]}")
+            self._log.info(f"Loaded {len(self._synced_ids)} already-synced trade IDs")
         except Exception:
             pass
-
-        # Load from trades.db
-        db_path2 = self._project_root / "data" / "trades.db"
-        try:
-            async with aiosqlite.connect(str(db_path2)) as db:
-                await db.executescript(TRADES_DB_SCHEMA)  # Ensure schema exists
-                cursor = await db.execute("SELECT id FROM trades")
-                rows = await cursor.fetchall()
-                for row in rows:
-                    self._synced_ids.add(row[0])
-        except Exception:
-            pass
-
-        self._log.info(f"Loaded {len(self._synced_ids)} already-synced trade IDs")

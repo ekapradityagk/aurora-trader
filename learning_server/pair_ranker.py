@@ -59,10 +59,9 @@ class PairRanker:
     def __init__(self) -> None:
         self._cfg = load_config()
 
-        # Determine the integration DB path from config — use winrate.db where
-        # TradeSync actually writes trade_results (not integration.db)
-        int_cfg = self._cfg.data.get("integration", {})
-        db_path = int_cfg.get("database", {}).get("winrate_path", "data/winrate.db")
+        # Determine the DB path — point to trading.db (single source of truth)
+        ts_cfg = self._cfg.data.get("trading_server", {})
+        db_path = ts_cfg.get("database", {}).get("path", "data/trading.db")
         # Resolve relative to project root (assumes CWD is project root)
         self._db_path = Path(db_path)
         if not self._db_path.is_absolute():
@@ -92,15 +91,15 @@ class PairRanker:
         lookback_str = lookback.isoformat()
 
         if not self._db_path.exists():
-            logger.warning(f"Integration DB not found at {self._db_path}")
+            logger.warning(f"Trading DB not found at {self._db_path}")
             return []
 
         try:
             async with aiosqlite.connect(str(self._db_path)) as db:
                 db.row_factory = aiosqlite.Row
                 rows = await db.execute_fetchall(
-                    """SELECT symbol, pnl, closed_at, side, strategy
-                       FROM trade_results
+                    """SELECT symbol, pnl, closed_at, side, strategy_name as strategy
+                       FROM closed_trades
                        WHERE pnl IS NOT NULL
                          AND closed_at >= ?
                        ORDER BY closed_at ASC""",

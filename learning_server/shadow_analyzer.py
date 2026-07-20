@@ -122,10 +122,10 @@ class ShadowAnalyzer:
         self._cfg = load_config()
         self._log = logger
 
-        # Determine DB path — read from winrate.db where TradeSync actually writes
-        # (not integration.db which never receives trade data)
-        int_cfg = self._cfg.data.get("integration", {})
-        db_path = int_cfg.get("database", {}).get("winrate_path", "data/winrate.db")
+        # Determine DB path — point to trading.db (single source of truth)
+        # where all closed trades now live (migrated from winrate.db)
+        ts_cfg = self._cfg.data.get("trading_server", {})
+        db_path = ts_cfg.get("database", {}).get("path", "data/trading.db")
         self._db_path = Path(db_path)
         if not self._db_path.is_absolute():
             self._db_path = Path.cwd() / self._db_path
@@ -202,9 +202,9 @@ class ShadowAnalyzer:
     # ------------------------------------------------------------------
 
     async def _fetch_trades(self, window_days: int) -> List[TradeRecord]:
-        """Fetch closed trades from the integration DB within the window."""
+        """Fetch closed trades from the trading.db closed_trades table."""
         if not self._db_path.exists():
-            self._log.warning(f"Integration DB not found at {self._db_path}")
+            self._log.warning(f"Trading DB not found at {self._db_path}")
             return []
 
         import aiosqlite
@@ -216,10 +216,11 @@ class ShadowAnalyzer:
             async with aiosqlite.connect(str(self._db_path)) as db:
                 db.row_factory = aiosqlite.Row
                 rows = await db.execute_fetchall(
-                    """SELECT trade_id, strategy, symbol, side,
-                              entry_price, exit_price, pnl, rrr,
-                              closed_at, opened_at, entry_reason, exit_reason
-                       FROM trade_results
+                    """SELECT id as trade_id, strategy_name as strategy, symbol, side,
+                              entry_price, exit_price, pnl, 0.0 as rrr,
+                              closed_at, entry_time as opened_at,
+                              reason as exit_reason, reason as entry_reason
+                       FROM closed_trades
                        WHERE pnl IS NOT NULL
                          AND closed_at >= ?
                        ORDER BY closed_at DESC""",

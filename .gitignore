@@ -11,3 +11,4 @@ data/regime_cache/
 data/active_strategy.json
 logs/
 *.log
+*.bak
