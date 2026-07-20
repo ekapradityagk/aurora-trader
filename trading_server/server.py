@@ -914,6 +914,19 @@ class TradingServer:
                     reason="exchange_closed",
                 )
 
+                # Persist to SQLite
+                await self._circuit_breaker.record_closed_trade(
+                    symbol=symbol,
+                    side=side_str,
+                    entry_price=float(position.entry_price),
+                    exit_price=float(position.exit_price or position.current_price or position.entry_price),
+                    pnl=float(position.realized_pnl or Decimal("0")),
+                    reason="exchange_closed",
+                    leverage=position.leverage,
+                    entry_time=position.entry_time.isoformat() if position.entry_time else "",
+                    strategy_name=position.strategy_name,
+                )
+
                 # Record in closed trades ring buffer for dashboard
                 side_str = "SELL" if position.side == OrderSide.BUY else "BUY"
                 self._record_closed_trade(
@@ -1146,6 +1159,19 @@ class TradingServer:
                 exit=str(exit_price),
                 pnl=str(pnl),
                 reason=reason,
+            )
+
+            # Persist to SQLite
+            await self._circuit_breaker.record_closed_trade(
+                symbol=symbol,
+                side=side_str,
+                entry_price=float(position.entry_price),
+                exit_price=float(exit_price),
+                pnl=float(pnl),
+                reason=reason,
+                leverage=position.leverage,
+                entry_time=position.entry_time.isoformat() if position.entry_time else "",
+                strategy_name=position.strategy_name,
             )
 
             # Record in closed trades ring buffer for dashboard

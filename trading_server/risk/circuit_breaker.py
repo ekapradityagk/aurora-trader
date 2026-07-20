@@ -56,6 +56,20 @@ CREATE TABLE IF NOT EXISTS paused_symbols (
     paused_at TEXT NOT NULL,
     PRIMARY KEY (symbol, date)
 );
+
+CREATE TABLE IF NOT EXISTS closed_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    exit_price REAL NOT NULL,
+    pnl REAL NOT NULL,
+    reason TEXT DEFAULT '',
+    leverage INTEGER DEFAULT 1,
+    closed_at TEXT NOT NULL,
+    entry_time TEXT DEFAULT '',
+    strategy_name TEXT DEFAULT ''
+);
 """
 
 
@@ -432,6 +446,53 @@ class CircuitBreaker:
         """Get the current accumulated daily P&L."""
         state = await self.get_state()
         return Decimal(str(state["current_pnl"]))
+
+    # ------------------------------------------------------------------
+    # Closed trades persistence
+    # ------------------------------------------------------------------
+
+    async def record_closed_trade(
+        self,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        exit_price: float,
+        pnl: float,
+        reason: str = "",
+        leverage: int = 20,
+        entry_time: str = "",
+        strategy_name: str = "",
+    ) -> None:
+        """Persist a closed trade record to SQLite."""
+        if not self._conn:
+            return
+        try:
+            from datetime import datetime, timezone
+            await self._conn.execute(
+                "INSERT INTO closed_trades "
+                "(symbol, side, entry_price, exit_price, pnl, reason, leverage, closed_at, entry_time, strategy_name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (symbol, side, entry_price, exit_price, pnl, reason, leverage,
+                 datetime.now(timezone.utc).isoformat(), entry_time, strategy_name),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            self._log.debug(f"Failed to persist closed trade for {symbol}: {exc}")
+
+    async def get_recent_closed_trades(self, limit: int = 100) -> list[dict]:
+        """Load recent closed trades from SQLite, newest first."""
+        if not self._conn:
+            return []
+        try:
+            cursor = await self._conn.execute(
+                "SELECT * FROM closed_trades ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            self._log.debug(f"Failed to load closed trades: {exc}")
+            return []
 
     # ------------------------------------------------------------------
     # Internals
