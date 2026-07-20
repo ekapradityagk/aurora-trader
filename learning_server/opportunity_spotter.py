@@ -17,12 +17,17 @@ direction (LONG / SHORT / BREWING_LONG / BREWING_SHORT).
 from __future__ import annotations
 
 import asyncio
+import json
 import math
+import time
+from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
+import aiosqlite
 
 from shared.config import load_config
 from shared.logger import get_logger
@@ -198,10 +203,147 @@ def _compute_adx(highs: List[float], lows: List[float], closes: List[float], per
 class OpportunitySpotter:
     """Scans active trading pairs for multi-TF entry opportunities."""
 
-    def __init__(self) -> None:
+    def __init__(self, db_path: str = "data/trading.db") -> None:
         self._cfg = load_config()
         self._log = logger
         self._session: Optional[aiohttp.ClientSession] = None
+        self._db_path = Path(db_path)
+        # In-memory accuracy cache: {symbol: {"hits": N, "total": N, "hit_rate": float}}
+        self._accuracy_cache: Dict[str, Dict[str, float]] = {}
+        self._accuracy_cache_ts: float = 0
+        self._accuracy_cache_ttl: float = 300  # 5 minutes
+
+    async def _load_accuracy_stats(self) -> Dict[str, Dict[str, float]]:
+        """Load past opportunity scans and compute per-symbol prediction accuracy.
+
+        For each past scan (older than 1 hour), checks if price moved in the
+        predicted direction by comparing with the latest available OHLCV data.
+        Returns {symbol: {"hits": N, "total": N, "hit_rate": 0.0-1.0}}.
+        """
+        now = time()
+        if now - self._accuracy_cache_ts < self._accuracy_cache_ttl and self._accuracy_cache:
+            return self._accuracy_cache
+
+        stats: Dict[str, Dict[str, float]] = defaultdict(lambda: {"hits": 0.0, "total": 0.0, "hit_rate": 0.5})
+
+        try:
+            db_path = str(self._db_path)
+            if not self._db_path.is_absolute():
+                db_path = str(Path.cwd() / self._db_path)
+
+            async with aiosqlite.connect(db_path) as db:
+                db.row_factory = aiosqlite.Row
+                # Load scans older than 1 hour (allows time for price movement)
+                cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+                cursor = await db.execute(
+                    """SELECT symbol, direction, confidence, price, scan_time, raw_json
+                       FROM opportunity_scans
+                       WHERE scan_time < ?
+                       ORDER BY scan_time DESC
+                       LIMIT 500""",
+                    (cutoff,),
+                )
+                rows = await cursor.fetchall()
+
+            # Group by symbol and check each prediction
+            for row in rows:
+                sym = row["symbol"]
+                direction = row["direction"]
+                scan_price = float(row["price"] or 0)
+                if scan_price <= 0:
+                    continue
+
+                # Determine if this was a LONG or SHORT prediction (not brewing)
+                is_long = "LONG" in (direction or "")
+                is_short = "SHORT" in (direction or "")
+                if not is_long and not is_short:
+                    continue
+
+                # Fetch current price to check if prediction was correct
+                current_price = await self._fetch_current_price(sym)
+                if current_price is None or current_price <= 0:
+                    continue
+
+                # Direction check: LONG = price went up, SHORT = price went down
+                if is_long and current_price > scan_price * 1.001:  # 0.1% threshold
+                    stats[sym]["hits"] += 1
+                    stats[sym]["total"] += 1
+                elif is_short and current_price < scan_price * 0.999:
+                    stats[sym]["hits"] += 1
+                    stats[sym]["total"] += 1
+                elif abs(current_price - scan_price) / scan_price > 0.002:
+                    # Price moved significantly but opposite to prediction → miss
+                    stats[sym]["total"] += 1
+                # else: price didn't move enough to judge → skip
+
+            # Compute hit rates with Bayesian smoothing (start at 50%)
+            for sym, s in stats.items():
+                total = s["total"]
+                hits = s["hits"]
+                if total > 0:
+                    # Beta prior: (hits + 1) / (total + 2) to avoid 0/1 extremes
+                    s["hit_rate"] = round((hits + 1) / (total + 2), 4)
+                else:
+                    s["hit_rate"] = 0.5
+
+            # Fallback: if no data, use neutral
+            if not stats:
+                self._log.debug("No past scans available for accuracy calibration")
+                self._accuracy_cache = {}
+                self._accuracy_cache_ts = now
+                return {}
+
+            self._accuracy_cache = dict(stats)
+            self._accuracy_cache_ts = now
+            self._log.debug(f"Accuracy stats loaded for {len(stats)} symbols")
+
+        except Exception as exc:
+            self._log.debug(f"Could not load accuracy stats: {exc}")
+            return {}
+
+        return self._accuracy_cache
+
+    async def _fetch_current_price(self, symbol: str) -> Optional[float]:
+        """Fetch latest price for a symbol from Binance."""
+        try:
+            session = await self._get_session()
+            url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return float(data.get("price", 0))
+        except Exception:
+            pass
+        return None
+
+    def _calibrate_confidence(self, symbol: str, raw_confidence: int, stats: Dict[str, Dict[str, float]]) -> int:
+        """Adjust confidence based on historical prediction accuracy for this symbol.
+
+        Blends raw technical analysis confidence with historical hit rate:
+          calibrated = raw * (1 - accuracy_weight) + (hit_rate * 100) * accuracy_weight
+
+        The weight increases as we have more data (max 30% weight at 20+ predictions).
+        """
+        sym_stats = stats.get(symbol, {})
+        total = sym_stats.get("total", 0)
+        hit_rate = sym_stats.get("hit_rate", 0.5)
+
+        if total < 3:
+            return raw_confidence  # Not enough data to calibrate
+
+        # Weight grows with data: 10% at 3 predictions → 30% at 20+
+        accuracy_weight = min(0.30, 0.10 + total * 0.01)
+
+        calibrated = raw_confidence * (1 - accuracy_weight) + (hit_rate * 100) * accuracy_weight
+        calibrated = max(1, min(99, int(calibrated)))
+
+        if abs(calibrated - raw_confidence) > 2:
+            self._log.info(
+                f"Calibrated {symbol}: {raw_confidence}% → {calibrated}% "
+                f"(hit_rate={hit_rate:.2f}, n={int(total)})"
+            )
+
+        return calibrated
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -211,7 +353,11 @@ class OpportunitySpotter:
         return self._session
 
     async def scan(self, symbols: Optional[List[str]] = None) -> ScanResult:
-        """Scan active pairs for opportunities across multiple TFs."""
+        """Scan active pairs for opportunities across multiple TFs.
+
+        After computing raw technical confidence, calibrates scores based on
+        historical prediction accuracy per symbol (loaded from past opportunity_scans).
+        """
         if symbols is None:
             symbols = self._cfg.data.get("trading_server", {}).get("symbols", [])
 
@@ -223,6 +369,13 @@ class OpportunitySpotter:
 
         self._log.info(f"Scanning {len(symbols)} pairs for opportunities...")
 
+        # Load historical accuracy stats for confidence calibration
+        accuracy_stats = await self._load_accuracy_stats()
+        if accuracy_stats:
+            syms_with_data = [s for s in symbols if s in accuracy_stats and accuracy_stats[s]["total"] >= 3]
+            if syms_with_data:
+                self._log.info(f"Accuracy data available for {len(syms_with_data)} symbols")
+
         session = await self._get_session()
         opportunities: List[Opportunity] = []
         errors: List[str] = []
@@ -231,6 +384,9 @@ class OpportunitySpotter:
             try:
                 opp = await self._scan_pair(session, sym)
                 if opp:
+                    # Calibrate confidence using historical accuracy
+                    calibrated = self._calibrate_confidence(sym, opp.confidence, accuracy_stats)
+                    opp.confidence = calibrated
                     opportunities.append(opp)
             except Exception as exc:
                 err = f"{sym}: {exc}"

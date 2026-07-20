@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import math
 import random
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -285,15 +286,16 @@ class HyperoptOptimizer:
         n_trials: Optional[int] = None,
         timeout: Optional[int] = None,
     ) -> OptimizationResult:
-        """Run a full optimisation cycle.
+        """Run a full optimisation cycle PER STRATEGY.
 
-        1. Load trade history
-        2. Walk-forward split (train 6mo, test 3mo)
-        3. Bayesian optimisation (TPE) on training window
-        4. Evaluate best params on test window
-        5. Monte Carlo permutation test
-        6. Save results to JSON
-        7. Return result summary
+        1. Load trade history, group by strategy_name
+        2. For each strategy with ≥ 10 trades:
+           a. Walk-forward split (train 6mo, test 3mo)
+           b. Bayesian optimisation (TPE) on training window
+           c. Evaluate best params on test window
+           d. Monte Carlo permutation test
+           e. Save per-strategy params to JSON
+        3. Return the best overall result (highest test Sharpe)
         """
         optuna_cfg = self._cfg.optuna_config
         n_trials = n_trials or optuna_cfg.get("n_trials", 100)
@@ -305,60 +307,214 @@ class HyperoptOptimizer:
             self._log.warning("No closed trades found — skipping optimisation")
             return OptimizationResult()
 
-        # 2. Walk-forward split
-        train_trades, test_trades = self._walk_forward_split(all_trades)
-        if not train_trades or not test_trades:
-            self._log.warning(
-                "Insufficient trade history for walk-forward split"
+        # Group by strategy name
+        by_strategy: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for t in all_trades:
+            s = t.get("strategy_name") or t.get("strategy", "unknown")
+            by_strategy[s].append(t)
+
+        self._log.info(
+            f"Loaded {len(all_trades)} trades across {len(by_strategy)} strategies: "
+            + ", ".join(f"{s}={len(ts)}" for s, ts in sorted(by_strategy.items()))
+        )
+
+        MIN_TRADES_PER_STRATEGY = 10
+        results: Dict[str, OptimizationResult] = {}
+        best_overall = OptimizationResult()
+
+        for strategy_name, strategy_trades in sorted(by_strategy.items()):
+            if len(strategy_trades) < MIN_TRADES_PER_STRATEGY:
+                self._log.info(
+                    f"Skipping '{strategy_name}' — only {len(strategy_trades)} trades "
+                    f"(need {MIN_TRADES_PER_STRATEGY})"
+                )
+                continue
+
+            self._log.info(
+                f"── Optimising '{strategy_name}' ({len(strategy_trades)} trades) ──"
             )
+
+            # 2. Walk-forward split
+            train_trades, test_trades = self._walk_forward_split(strategy_trades)
+            if not train_trades or not test_trades:
+                self._log.info(f"  '{strategy_name}': insufficient time range for walk-forward")
+                continue
+
+            self._log.info(
+                f"  Walk-forward: {len(train_trades)} train, {len(test_trades)} test"
+            )
+
+            # 3. Optimise on training set
+            best_params, train_sharpe = await self._optimize(
+                strategy_trades, n_trials, timeout, strategy_name
+            )
+            if not best_params:
+                self._log.info(f"  '{strategy_name}': optimisation produced no params")
+                continue
+
+            self._log.info(
+                f"  Best params: {best_params}  (train Sharpe={train_sharpe:.4f})"
+            )
+
+            # 4. Evaluate on test set
+            test_pnl = _simulate_trades(test_trades, best_params)
+            test_sharpe = _sharpe_ratio(test_pnl)
+            self._log.info(f"  Test Sharpe={test_sharpe:.4f}")
+
+            # 5. Monte Carlo permutation test
+            strategy_all_pnl = _simulate_trades(strategy_trades, best_params)
+            mc_p_value = _monte_carlo_permutation_test(strategy_all_pnl, test_sharpe)
+            self._log.info(
+                f"  Monte Carlo p-value={mc_p_value:.4f} "
+                f"(lower is better, target < 0.05)"
+            )
+
+            # 6. Build result
+            now_str = datetime.now(timezone.utc).isoformat()
+            result = OptimizationResult(
+                params=best_params,
+                train_sharpe=train_sharpe,
+                test_sharpe=test_sharpe,
+                mc_p_value=mc_p_value,
+                n_trials=n_trials,
+                timestamp=now_str,
+                version_tag=f"opt_{strategy_name}_{now_str[:10].replace('-', '')}",
+            )
+            results[strategy_name] = result
+
+            # Save per-strategy params
+            self._save_result(result, strategy_name)
+
+            # Track best overall
+            if test_sharpe > best_overall.test_sharpe:
+                best_overall = result
+
+        if not results:
+            self._log.warning("No strategy produced valid optimisation results")
             return OptimizationResult()
 
-        self._log.info(
-            f"Walk-forward: {len(train_trades)} train trades, "
-            f"{len(test_trades)} test trades"
-        )
+        # Save aggregated result (best overall + all strategies)
+        self._save_aggregated(results, best_overall)
 
-        # 3. Optimise on training set
-        best_params, train_sharpe = await self._optimize(
-            train_trades, n_trials, timeout
-        )
-        if not best_params:
-            self._log.warning("Optimisation produced no valid parameters")
-            return OptimizationResult()
+        # Record performance baseline for next comparison
+        await self._record_performance_baseline(all_trades, results)
 
         self._log.info(
-            f"Best params found: {best_params}  "
-            f"(train Sharpe={train_sharpe:.4f})"
+            f"Per-strategy optimisation complete. "
+            f"Best: {best_overall.version_tag} (test Sharpe={best_overall.test_sharpe:.4f})"
         )
 
-        # 4. Evaluate on test set
-        test_pnl = _simulate_trades(test_trades, best_params)
-        test_sharpe = _sharpe_ratio(test_pnl)
-        self._log.info(f"Test Sharpe={test_sharpe:.4f}")
+        # Check if performance improved since last run
+        await self._check_feedback(by_strategy)
 
-        # 5. Monte Carlo permutation test
-        all_pnl = _simulate_trades(all_trades, best_params)
-        mc_p_value = _monte_carlo_permutation_test(all_pnl, test_sharpe)
-        self._log.info(
-            f"Monte Carlo p-value={mc_p_value:.4f} "
-            f"(lower is better, target < 0.05)"
-        )
+        return best_overall
 
-        # 6. Build result & save
-        now_str = datetime.now(timezone.utc).isoformat()
-        result = OptimizationResult(
-            params=best_params,
-            train_sharpe=train_sharpe,
-            test_sharpe=test_sharpe,
-            mc_p_value=mc_p_value,
-            n_trials=n_trials,
-            timestamp=now_str,
-            version_tag=f"opt_{now_str[:10].replace('-', '')}",
-        )
+    async def _record_performance_baseline(
+        self,
+        all_trades: List[Dict[str, Any]],
+        results: Dict[str, OptimizationResult],
+    ) -> None:
+        """Record the current performance baseline so the next optimisation
+        cycle can measure whether things improved."""
+        baseline: Dict[str, Any] = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "total_trades": len(all_trades),
+            "strategies": {},
+        }
+        by_strat: Dict[str, List[float]] = defaultdict(list)
+        for t in all_trades:
+            s = t.get("strategy_name") or t.get("strategy", "unknown")
+            pnl = float(t.get("pnl", 0) or 0)
+            if pnl != 0:
+                by_strat[s].append(pnl)
 
-        self._save_result(result)
+        for s, pnls in by_strat.items():
+            if pnls:
+                wins = sum(1 for p in pnls if p > 0)
+                total_pnl = sum(pnls)
+                sharpe = 0.0
+                if len(pnls) >= 2:
+                    mean_p = sum(pnls) / len(pnls)
+                    var_p = sum((p - mean_p) ** 2 for p in pnls) / (len(pnls) - 1)
+                    if var_p > 0:
+                        sharpe = (mean_p / (var_p ** 0.5)) * (252 ** 0.5)
+                baseline["strategies"][s] = {
+                    "trades": len(pnls),
+                    "win_rate": round(wins / len(pnls), 4) if pnls else 0,
+                    "total_pnl": round(total_pnl, 4),
+                    "sharpe": round(sharpe, 4),
+                }
 
-        return result
+        # Record optimisation output alongside baseline
+        baseline["optimization"] = {
+            s: {
+                "test_sharpe": round(r.test_sharpe, 4),
+                "train_sharpe": round(r.train_sharpe, 4),
+                "mc_p_value": round(r.mc_p_value, 4),
+            }
+            for s, r in results.items()
+        }
+
+        try:
+            filepath = self._output_dir / "performance_baseline.json"
+            with open(filepath, "w") as f:
+                json.dump(baseline, f, indent=2)
+        except IOError:
+            pass
+
+    async def _check_feedback(
+        self,
+        by_strategy: Dict[str, List[Dict[str, Any]]],
+    ) -> None:
+        """Compare current performance against the previous baseline.
+
+        Loads the previous performance_baseline.json and compares per-strategy
+        metrics to see if optimisation is trending in the right direction.
+        """
+        filepath = self._output_dir / "performance_baseline.json"
+        if not filepath.is_file():
+            self._log.info("No previous baseline found — first optimisation run")
+            return
+
+        try:
+            with open(filepath) as f:
+                previous = json.load(f)
+        except (IOError, json.JSONDecodeError):
+            return
+
+        # Compute current metrics
+        prev_strats = previous.get("strategies", {})
+        prev_opt = previous.get("optimization", {})
+
+        for s, trades in by_strategy.items():
+            pnls = [float(t.get("pnl", 0) or 0) for t in trades if float(t.get("pnl", 0) or 0) != 0]
+            if not pnls or len(pnls) < 3:
+                continue
+
+            wins = sum(1 for p in pnls if p > 0)
+            current_wr = wins / len(pnls)
+
+            prev_data = prev_strats.get(s, {})
+            prev_wr = prev_data.get("win_rate", 0)
+            prev_sharpe = prev_data.get("sharpe", 0)
+            prev_trades = prev_data.get("trades", 0)
+
+            # Also check optimisation quality
+            opt_data = prev_opt.get(s, {})
+            opt_sharpe = opt_data.get("test_sharpe", 0)
+
+            changes = []
+            wr_change = current_wr - prev_wr
+            if prev_trades > 0:
+                changes.append(f"win_rate: {prev_wr:.1%} → {current_wr:.1%} ({wr_change:+.1%})")
+                changes.append(f"prev_opt_test_sharpe: {opt_sharpe:.2f}")
+
+            if changes:
+                self._log.info(
+                    f"  📊 Feedback [{s}]: " + ", ".join(changes)
+                )
+
+        self._log.info("Performance feedback recorded — next run will compare again")
 
     # ------------------------------------------------------------------
     # Walk-forward split
@@ -430,8 +586,15 @@ class HyperoptOptimizer:
         train_trades: List[Dict[str, Any]],
         n_trials: int,
         timeout: int,
+        strategy_name: str = "default",
     ) -> Tuple[Optional[Dict[str, float]], float]:
         """Run Optuna TPE optimisation on training trades.
+
+        Args:
+            train_trades: Trade list for training.
+            n_trials: Number of Optuna trials.
+            timeout: Max seconds for optimisation.
+            strategy_name: Strategy name for labelling the study.
 
         Returns (best_params, best_sharpe).
         """
@@ -480,13 +643,13 @@ class HyperoptOptimizer:
         study = optuna.create_study(
             direction=optuna_cfg.get("direction", "maximize"),
             sampler=optuna.samplers.TPESampler(seed=42),
-            study_name="aurora_hyperopt",
+            study_name=f"aurora_hyperopt_{strategy_name}",
             storage=storage_url,
             load_if_exists=True,
         )
 
         self._log.info(
-            f"Starting Optuna optimisation: {n_trials} trials, "
+            f"Starting Optuna for '{strategy_name}': {n_trials} trials, "
             f"{timeout}s timeout"
         )
 
@@ -502,7 +665,7 @@ class HyperoptOptimizer:
         best_value = study.best_value if study.best_value is not None else 0.0
 
         self._log.info(
-            f"Optimisation complete: {len(study.trials)} trials, "
+            f"'{strategy_name}' optimisation complete: {len(study.trials)} trials, "
             f"best Sharpe={best_value:.4f}"
         )
 
@@ -512,11 +675,14 @@ class HyperoptOptimizer:
     # Result persistence
     # ------------------------------------------------------------------
 
-    def _save_result(self, result: OptimizationResult) -> None:
-        """Save the optimisation result to JSON so the trading server can
-        pick it up."""
-        filepath = self._output_dir / "best_params.json"
+    def _save_result(self, result: OptimizationResult, strategy_name: str = "default") -> None:
+        """Save per-strategy optimisation result to JSON.
+
+        Saves to: data/optimization/<strategy>_params.json
+        """
+        filepath = self._output_dir / f"{strategy_name}_params.json"
         payload = {
+            "strategy": strategy_name,
             "version_tag": result.version_tag,
             "timestamp": result.timestamp,
             "params": result.params,
@@ -529,20 +695,59 @@ class HyperoptOptimizer:
         try:
             with open(filepath, "w") as f:
                 json.dump(payload, f, indent=2)
-            self._log.info(f"Best params saved to {filepath}")
+            self._log.info(f"Params for '{strategy_name}' saved to {filepath}")
         except IOError as exc:
-            self._log.error(f"Failed to save best params: {exc}")
+            self._log.error(f"Failed to save params for '{strategy_name}': {exc}")
 
         # Also save a timestamped copy
         ts_path = (
             self._output_dir
-            / f"best_params_{result.timestamp[:10]}.json"
+            / f"{strategy_name}_params_{result.timestamp[:10]}.json"
         )
         try:
             with open(ts_path, "w") as f:
                 json.dump(payload, f, indent=2)
         except IOError:
             pass
+
+    def _save_aggregated(
+        self,
+        results: Dict[str, OptimizationResult],
+        best: OptimizationResult,
+    ) -> None:
+        """Save an aggregated params file with all strategies + best overall.
+
+        Overwrites best_params.json (the file the trading server reads)
+        with the best strategy's params, plus a full overview.
+        """
+        filepath = self._output_dir / "best_params.json"
+        payload = {
+            "version_tag": best.version_tag,
+            "timestamp": best.timestamp,
+            "strategy": best.version_tag.split("_")[1] if "_" in best.version_tag else "default",
+            "params": best.params,
+            "train_sharpe": round(best.train_sharpe, 4),
+            "test_sharpe": round(best.test_sharpe, 4),
+            "mc_p_value": round(best.mc_p_value, 4),
+            "n_trials": best.n_trials,
+            "strategies": {
+                name: {
+                    "params": r.params,
+                    "train_sharpe": round(r.train_sharpe, 4),
+                    "test_sharpe": round(r.test_sharpe, 4),
+                    "mc_p_value": round(r.mc_p_value, 4),
+                    "n_trials": r.n_trials,
+                }
+                for name, r in results.items()
+            },
+        }
+
+        try:
+            with open(filepath, "w") as f:
+                json.dump(payload, f, indent=2)
+            self._log.info(f"Aggregated best params saved to {filepath}")
+        except IOError as exc:
+            self._log.error(f"Failed to save aggregated params: {exc}")
 
     def load_best_params(self) -> Optional[Dict[str, float]]:
         """Load the best parameters from the saved JSON file."""
