@@ -70,6 +70,45 @@ CREATE TABLE IF NOT EXISTS closed_trades (
     entry_time TEXT DEFAULT '',
     strategy_name TEXT DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id TEXT NOT NULL,
+    strategy_name TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    price REAL NOT NULL,
+    timeframe TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    regime TEXT DEFAULT '',
+    executed INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS trailing_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    current_price REAL NOT NULL,
+    stop_loss REAL NOT NULL,
+    leverage INTEGER DEFAULT 1,
+    event_time TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS opportunity_scans (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_time TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    confidence INTEGER NOT NULL,
+    primary_timeframe TEXT DEFAULT '',
+    entry_notes TEXT DEFAULT '',
+    price REAL DEFAULT 0,
+    brewing INTEGER DEFAULT 0,
+    raw_json TEXT DEFAULT ''
+);
 """
 
 
@@ -492,6 +531,139 @@ class CircuitBreaker:
             return [dict(r) for r in rows]
         except Exception as exc:
             self._log.debug(f"Failed to load closed trades: {exc}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Signal persistence
+    # ------------------------------------------------------------------
+
+    async def record_signal(
+        self,
+        signal_id: str,
+        strategy_name: str,
+        symbol: str,
+        direction: str,
+        confidence: float,
+        price: float,
+        timeframe: str = "",
+        reason: str = "",
+        regime: str = "",
+        executed: bool = False,
+    ) -> None:
+        """Persist a trading signal to SQLite."""
+        if not self._conn:
+            return
+        try:
+            from datetime import datetime, timezone
+            await self._conn.execute(
+                "INSERT INTO signals (signal_id, strategy_name, symbol, direction, confidence, price, timeframe, reason, regime, executed, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (signal_id, strategy_name, symbol, direction, confidence, price, timeframe, reason, regime, int(executed),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            self._log.debug(f"Failed to persist signal: {exc}")
+
+    async def get_recent_signals(self, limit: int = 100) -> list[dict]:
+        """Load recent signals from SQLite, newest first."""
+        if not self._conn:
+            return []
+        try:
+            cursor = await self._conn.execute(
+                "SELECT * FROM signals ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            self._log.debug(f"Failed to load signals: {exc}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Trailing event persistence
+    # ------------------------------------------------------------------
+
+    async def record_trailing_event(
+        self,
+        symbol: str,
+        event_type: str,
+        entry_price: float,
+        current_price: float,
+        stop_loss: float,
+        leverage: int = 1,
+    ) -> None:
+        """Persist a trailing stop event to SQLite."""
+        if not self._conn:
+            return
+        try:
+            from datetime import datetime, timezone
+            await self._conn.execute(
+                "INSERT INTO trailing_events (symbol, event_type, entry_price, current_price, stop_loss, leverage, event_time) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (symbol, event_type, entry_price, current_price, stop_loss, leverage,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            self._log.debug(f"Failed to persist trailing event: {exc}")
+
+    async def get_recent_trailing_events(self, limit: int = 100) -> list[dict]:
+        """Load recent trailing events from SQLite, newest first."""
+        if not self._conn:
+            return []
+        try:
+            cursor = await self._conn.execute(
+                "SELECT * FROM trailing_events ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            self._log.debug(f"Failed to load trailing events: {exc}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Opportunity scan persistence
+    # ------------------------------------------------------------------
+
+    async def record_opportunity_scan(
+        self,
+        scan_time: str,
+        symbol: str,
+        direction: str,
+        confidence: int,
+        primary_timeframe: str = "",
+        entry_notes: str = "",
+        price: float = 0,
+        brewing: bool = False,
+        raw_json: str = "",
+    ) -> None:
+        """Persist an opportunity scan result to SQLite."""
+        if not self._conn:
+            return
+        try:
+            await self._conn.execute(
+                "INSERT INTO opportunity_scans (scan_time, symbol, direction, confidence, primary_timeframe, entry_notes, price, brewing, raw_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (scan_time, symbol, direction, confidence, primary_timeframe, entry_notes, price, int(brewing), raw_json),
+            )
+            await self._conn.commit()
+        except Exception as exc:
+            self._log.debug(f"Failed to persist opportunity: {exc}")
+
+    async def get_latest_opportunity_scan(self) -> list[dict]:
+        """Load the most recent opportunity scan results."""
+        if not self._conn:
+            return []
+        try:
+            cursor = await self._conn.execute(
+                "SELECT * FROM opportunity_scans ORDER BY id DESC LIMIT 20",
+            )
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+        except Exception as exc:
+            self._log.debug(f"Failed to load opportunities: {exc}")
             return []
 
     # ------------------------------------------------------------------

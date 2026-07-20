@@ -593,6 +593,22 @@ class TradingServer:
         signals.sort(key=lambda s: s.confidence, reverse=True)
         best = signals[0]
 
+        # Persist all signals to SQLite
+        for sig in signals:
+            if self._circuit_breaker:
+                await self._circuit_breaker.record_signal(
+                    signal_id=sig.id,
+                    strategy_name=sig.strategy_name,
+                    symbol=sig.symbol,
+                    direction=sig.direction.value,
+                    confidence=sig.confidence,
+                    price=float(sig.price),
+                    timeframe=sig.timeframe.value if hasattr(sig.timeframe, 'value') else str(sig.timeframe),
+                    reason=sig.reason,
+                    regime=regime,
+                    executed=(sig.trade_id is not None),
+                )
+
         # Store signals for API
         async with self._lock:
             self._recent_signals.append(best)
@@ -1065,6 +1081,16 @@ class TradingServer:
                                     self._trailing_events.append(event)
                                     if len(self._trailing_events) > self._max_trailing_events:
                                         self._trailing_events.pop(0)
+                                    # Persist to SQLite
+                                    if self._circuit_breaker:
+                                        await self._circuit_breaker.record_trailing_event(
+                                            symbol=symbol,
+                                            event_type=event["type"],
+                                            entry_price=event["entry_price"],
+                                            current_price=event["current_price"],
+                                            stop_loss=event["stop_loss"],
+                                            leverage=event["leverage"],
+                                        )
                                     # Send Discord webhook notification
                                     await self._send_discord_webhook(event)
                             elif action == "break_even":

@@ -830,6 +830,42 @@ class LearningServer:
 
                 result = await self._opportunity_spotter.scan(symbols=symbols)
 
+                # Persist opportunity scan results to shared DB
+                try:
+                    import sqlite3, json
+                    from datetime import datetime, timezone
+                    from pathlib import Path
+                    scan_time = result.timestamp or datetime.now(timezone.utc).isoformat()
+                    db_path = Path(__file__).resolve().parent.parent / "data" / "trading.db"
+                    conn = sqlite3.connect(str(db_path))
+                    conn.execute("PRAGMA journal_mode=WAL")
+                    for opp in result.opportunities:
+                        conn.execute(
+                            "INSERT INTO opportunity_scans (scan_time, symbol, direction, confidence, primary_timeframe, entry_notes, price, brewing, raw_json) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (scan_time, opp.symbol, opp.direction, opp.confidence,
+                             opp.primary_timeframe, opp.entry_notes, opp.price,
+                             int(opp.brewing), json.dumps({
+                                 "timeframes": {
+                                     tf: {
+                                         "direction": s.direction,
+                                         "confidence": s.confidence,
+                                         "rsi": s.rsi,
+                                         "bb_position": s.bb_position,
+                                         "ema_position": s.ema_position,
+                                         "adx": s.adx,
+                                         "reasons": s.reasons,
+                                     }
+                                     for tf, s in opp.timeframes.items()
+                                 }
+                             })),
+                        )
+                    conn.commit()
+                    conn.close()
+                    self._log.debug(f"Persisted {len(result.opportunities)} scan results")
+                except Exception as exc:
+                    self._log.debug(f"Failed to persist scan results: {exc}")
+
                 # Find the best non-brewing signal
                 best = None
                 for opp in result.opportunities:
