@@ -220,7 +220,7 @@ class OpportunitySpotter:
         predicted direction by comparing with the latest available OHLCV data.
         Returns {symbol: {"hits": N, "total": N, "hit_rate": 0.0-1.0}}.
         """
-        now = time()
+        now = time.time()
         if now - self._accuracy_cache_ts < self._accuracy_cache_ttl and self._accuracy_cache:
             return self._accuracy_cache
 
@@ -516,11 +516,11 @@ class OpportunitySpotter:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={binance_interval}&limit={limit}"
 
         try:
-            async with session.get(url) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 if resp.status != 200:
                     return None, None
                 raw = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError):
+        except (aiohttp.ClientError, asyncio.TimeoutError, asyncio.CancelledError):
             return None, None
 
         if not raw or len(raw) < 30:

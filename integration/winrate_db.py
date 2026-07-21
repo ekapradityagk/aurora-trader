@@ -27,7 +27,7 @@ logger = get_logger("integration.winrate_db")
 # Defaults
 # ---------------------------------------------------------------------------
 
-_DEFAULT_DB_PATH = "data/winrate.db"
+_DEFAULT_DB_PATH = "data/trading.db"
 
 
 # ---------------------------------------------------------------------------
@@ -87,22 +87,14 @@ class WinrateDB:
                 )
                 """
             )
-            # Individual trade results
+            # Individual trade results — now a VIEW pointing to closed_trades
+            # Table is already created as a view during Phase 3 migration.
+            # Skip table creation to avoid conflicts with the view.
             await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS trade_results (
-                    trade_id TEXT PRIMARY KEY,
-                    version_tag TEXT NOT NULL,
-                    strategy TEXT NOT NULL,
-                    symbol TEXT NOT NULL,
-                    side TEXT NOT NULL,
-                    entry_price REAL NOT NULL,
-                    exit_price REAL,
-                    pnl REAL,
-                    rrr REAL,
-                    closed_at TEXT
-                )
-                """
+                "CREATE VIEW IF NOT EXISTS trade_results AS "
+                "SELECT id AS trade_id, version_tag, strategy_name AS strategy, symbol, side, "
+                "       entry_price, exit_price, pnl, 0.0 AS rrr, closed_at "
+                "FROM closed_trades WHERE pnl IS NOT NULL"
             )
             # Daily summary
             await db.execute(
@@ -130,11 +122,11 @@ class WinrateDB:
             )
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tr_version "
-                "ON trade_results(version_tag)"
+                "ON closed_trades(strategy_name)"
             )
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_tr_closed "
-                "ON trade_results(closed_at)"
+                "ON closed_trades(closed_at)"
             )
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_ds_date "
@@ -144,6 +136,28 @@ class WinrateDB:
                 "CREATE INDEX IF NOT EXISTS idx_ds_version "
                 "ON daily_summary(version_tag)"
             )
+
+            # Trigger: redirect INSERTs on the view to closed_trades
+            await db.execute("""\
+                CREATE TRIGGER IF NOT EXISTS trade_results_insert
+                INSTEAD OF INSERT ON trade_results
+                BEGIN
+                    INSERT OR IGNORE INTO closed_trades
+                        (symbol, side, entry_price, exit_price, pnl, reason, leverage, closed_at, strategy_name, version_tag)
+                    VALUES (
+                        NEW.symbol,
+                        NEW.side,
+                        NEW.entry_price,
+                        NEW.exit_price,
+                        NEW.pnl,
+                        'winrate_db',
+                        1,
+                        NEW.closed_at,
+                        NEW.strategy,
+                        NEW.version_tag
+                    );
+                END
+            """)
 
             await db.commit()
 
@@ -453,7 +467,7 @@ class WinrateDB:
     async def get_recent_trades(
         self, version_tag: Optional[str] = None, limit: int = 50
     ) -> List[Dict[str, Any]]:
-        """Return recent trade results, optionally filtered by version."""
+        """Return recent trade results from closed_trades (via trade_results view)."""
         async with aiosqlite.connect(str(self._db_path)) as db:
             await db.execute("PRAGMA journal_mode=WAL")
             if version_tag:

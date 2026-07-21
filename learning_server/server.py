@@ -739,7 +739,12 @@ class LearningServer:
                 "errors": result.errors[:5],
             })
         except Exception as exc:
-            self._log.error(f"Opportunity scan failed: {exc}", exc_info=True)
+            import traceback
+            tb_str = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+            self._log.error(
+                f"Opportunity scan failed: {exc}\n{tb_str}",
+                exc_info=True,
+            )
             return web.json_response(
                 {"error": "Opportunity scan failed", "detail": str(exc)},
                 status=500,
@@ -919,8 +924,11 @@ class LearningServer:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
+                import traceback
+                tb_str = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
                 self._log.error(
-                    f"Signal executor error: {exc}", exc_info=True
+                    f"Signal executor error: {exc}\n{tb_str}",
+                    exc_info=True,
                 )
 
             # Wait for next cycle (check every 30s if stopped)
