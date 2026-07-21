@@ -246,6 +246,13 @@ class OpportunitySpotter:
                 rows = await cursor.fetchall()
 
             # Group by symbol and check each prediction
+            # 🚀 Deduplicate price fetches — one Binance API call per unique symbol
+            price_cache: Dict[str, Optional[float]] = {}
+            for row in rows:
+                sym = row["symbol"]
+                if sym not in price_cache:
+                    price_cache[sym] = await self._fetch_current_price(sym)
+
             for row in rows:
                 sym = row["symbol"]
                 direction = row["direction"]
@@ -259,8 +266,8 @@ class OpportunitySpotter:
                 if not is_long and not is_short:
                     continue
 
-                # Fetch current price to check if prediction was correct
-                current_price = await self._fetch_current_price(sym)
+                # Use cached price
+                current_price = price_cache.get(sym)
                 if current_price is None or current_price <= 0:
                     continue
 
@@ -370,7 +377,13 @@ class OpportunitySpotter:
         self._log.info(f"Scanning {len(symbols)} pairs for opportunities...")
 
         # Load historical accuracy stats for confidence calibration
-        accuracy_stats = await self._load_accuracy_stats()
+        try:
+            accuracy_stats = await asyncio.wait_for(
+                self._load_accuracy_stats(), timeout=45
+            )
+        except (asyncio.TimeoutError, Exception) as exc:
+            self._log.warning(f"Accuracy calibration skipped: {exc}")
+            accuracy_stats = {}
         if accuracy_stats:
             syms_with_data = [s for s in symbols if s in accuracy_stats and accuracy_stats[s]["total"] >= 3]
             if syms_with_data:
