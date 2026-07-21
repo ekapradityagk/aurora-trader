@@ -206,6 +206,11 @@ class CircuitBreaker:
         Returns:
             Dict with current daily stats: total_pnl, is_paused, etc.
         """
+        # 🚫 Skip sync_trade_close — these are HISTORICAL Binance trades,
+        # not today's actual PnL. They already affected starting_balance.
+        if reason == "sync_trade_close":
+            return await self.get_state()
+
         today = self._utc_date()
         now = self._utc_now_str()
 
@@ -448,7 +453,7 @@ class CircuitBreaker:
         """
         state = await self.get_state()
         # The new starting balance is the old starting balance + realised PnL
-        new_sb = max(state["starting_balance"] + state["current_pnl"], 100.0)
+        new_sb = max(state["starting_balance"] + state["current_pnl"], 1.0)
         now = self._utc_now_str()
 
         await self._conn.execute("""
